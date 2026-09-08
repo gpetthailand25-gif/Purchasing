@@ -170,6 +170,17 @@ function createStore() {
     products[id] = { name, type };
     return { productId: id, name, type };
   }v
+    function deleteProduct(productId) {
+    if (!products[productId]) throw new HttpError(404, `ไม่พบ Product: ${productId}`);
+    const usedIn = whereUsed('SEMI_FINISHED', productId);
+    if (usedIn.length > 0) {
+      const names = usedIn.map((u) => u.productName).join(', ');
+      throw new HttpError(400, `ลบไม่ได้ เพราะสินค้านี้ถูกใช้เป็น Component อยู่ใน: ${names} — กรุณาลบออกจาก BOM เหล่านั้นก่อน`);
+    }
+    delete boms[productId];
+    delete products[productId];
+    return { productId, deleted: true };
+  }v
   // ==== Forecast ====
   function upsertForecast({ year, month, productId, quantity, enteredBy, note }) {
     if (!products[productId]) throw new HttpError(400, `ไม่พบ Product: ${productId}`);
@@ -553,6 +564,7 @@ function createStore() {
     materials,
     suppliers,
     createProduct,
+    deleteProduct,
     upsertForecast,
     addForecastAdjustment,
     listForecast,
