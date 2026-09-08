@@ -14,6 +14,10 @@ export default function BomPage() {
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [tab, setTab] = useState('master');
   const [search, setSearch] = useState('');
+  const [addingProduct, setAddingProduct] = useState(false);
+  const [newProductName, setNewProductName] = useState('');
+  const [newProductType, setNewProductType] = useState('FINISHED');
+  const [productError, setProductError] = useState(null);
 
   const loadMasterData = useCallback(async () => {
     setError(null);
@@ -29,6 +33,22 @@ export default function BomPage() {
   }, []);
 
   useEffect(() => { loadMasterData(); }, [loadMasterData]);
+
+  async function submitNewProduct() {
+    if (!newProductName.trim()) return;
+    setProductError(null);
+    try {
+      const created = await api.createProduct({ name: newProductName.trim(), type: newProductType });
+      setProducts((prev) => ({ ...prev, [created.productId]: { name: created.name, type: created.type } }));
+      setSelectedProduct(created.productId);
+      setTab('master');
+      setNewProductName('');
+      setNewProductType('FINISHED');
+      setAddingProduct(false);
+    } catch (e) {
+      setProductError(e.message);
+    }
+  }
 
   if (error) return <ErrorState error={error} onRetry={loadMasterData} />;
   if (!products || !materials || !selectedProduct) return <LoadingState />;
@@ -46,6 +66,32 @@ export default function BomPage() {
             <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ค้นหา Product..."
               className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-8 pr-3 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
+          </div>
+
+          <div className="mt-3">
+            {!addingProduct ? (
+              <button onClick={() => setAddingProduct(true)}
+                className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-amber-300 px-3 py-2 text-xs font-medium text-amber-700 hover:bg-amber-50">
+                <Plus size={14} /> เพิ่มสินค้าใหม่ / BOM ใหม่
+              </button>
+            ) : (
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                <select value={newProductType} onChange={(e) => setNewProductType(e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
+                  <option value="FINISHED">Finished Product</option>
+                  <option value="SEMI_FINISHED">Semi-Finished</option>
+                </select>
+                <input value={newProductName} onChange={(e) => setNewProductName(e.target.value)} placeholder="ชื่อสินค้า"
+                  className="mt-2 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
+                {productError && <p className="mt-1.5 text-[11px] text-red-600">{productError}</p>}
+                <div className="mt-2 flex justify-end gap-1.5">
+                  <button onClick={() => { setAddingProduct(false); setProductError(null); setNewProductName(''); }}
+                    className="rounded-lg px-2 py-1 text-[11px] font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
+                  <button onClick={submitNewProduct}
+                    className="rounded-lg bg-slate-900 px-2 py-1 text-[11px] font-medium text-white hover:bg-slate-700">สร้าง</button>
+                </div>
+              </div>
+            )}
           </div>
 
           <p className="mb-1.5 mt-4 px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Finished Product</p>
