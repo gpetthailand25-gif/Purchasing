@@ -28,8 +28,13 @@ function registerRoutes(router, store) {
   const READ_ALL = ['PURCHASING', 'WAREHOUSE', 'MANAGEMENT'];
   router.get('/products', async () => ({ status: 200, body: store.products }), { roles: READ_ALL });
   router.get('/materials', async () => ({ status: 200, body: store.materials }), { roles: READ_ALL });
-  router.get('/suppliers', async () => ({ status: 200, body: store.suppliers }), { roles: READ_ALL });
+    router.get('/suppliers', async () => ({ status: 200, body: store.suppliers }), { roles: READ_ALL });
 
+  router.post('/products', async ({ body }) => {
+    requireFields(body, ['name', 'type']);
+    const product = store.createProduct(body);
+    return { status: 201, body: product };
+  }, { roles: ['PURCHASING'] });
   // ---------------- Forecast (PURCHASING เขียน, MANAGEMENT อ่าน) ----------------
   router.post('/forecast', async ({ body }) => {
     requireFields(body, ['year', 'month', 'productId', 'quantity']);
