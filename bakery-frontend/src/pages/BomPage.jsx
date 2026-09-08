@@ -15,6 +15,7 @@ export default function BomPage() {
   const [tab, setTab] = useState('master');
   const [search, setSearch] = useState('');
   const [addingProduct, setAddingProduct] = useState(false);
+  const [newProductId, setNewProductId] = useState('');
   const [newProductName, setNewProductName] = useState('');
   const [newProductType, setNewProductType] = useState('FINISHED');
   const [productError, setProductError] = useState(null);
@@ -39,10 +40,15 @@ export default function BomPage() {
     if (!newProductName.trim()) return;
     setProductError(null);
     try {
-      const created = await api.createProduct({ name: newProductName.trim(), type: newProductType });
+      const created = await api.createProduct({
+        productId: newProductId.trim() || undefined,
+        name: newProductName.trim(),
+        type: newProductType,
+      });
       setProducts((prev) => ({ ...prev, [created.productId]: { name: created.name, type: created.type } }));
       setSelectedProduct(created.productId);
       setTab('master');
+      setNewProductId('');
       setNewProductName('');
       setNewProductType('FINISHED');
       setAddingProduct(false);
@@ -97,11 +103,13 @@ export default function BomPage() {
                   <option value="FINISHED">Finished Product</option>
                   <option value="SEMI_FINISHED">Semi-Finished</option>
                 </select>
+                <input value={newProductId} onChange={(e) => setNewProductId(e.target.value)} placeholder="รหัสสินค้า (ไม่กรอก = สร้างอัตโนมัติ)"
+                  className="mt-2 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
                 <input value={newProductName} onChange={(e) => setNewProductName(e.target.value)} placeholder="ชื่อสินค้า"
                   className="mt-2 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
                 {productError && <p className="mt-1.5 text-[11px] text-red-600">{productError}</p>}
                 <div className="mt-2 flex justify-end gap-1.5">
-                  <button onClick={() => { setAddingProduct(false); setProductError(null); setNewProductName(''); }}
+                  <button onClick={() => { setAddingProduct(false); setProductError(null); setNewProductId(''); setNewProductName(''); }}
                     className="rounded-lg px-2 py-1 text-[11px] font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
                   <button onClick={submitNewProduct}
                     className="rounded-lg bg-slate-900 px-2 py-1 text-[11px] font-medium text-white hover:bg-slate-700">สร้าง</button>
