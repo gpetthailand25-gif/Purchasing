@@ -35,6 +35,11 @@ function registerRoutes(router, store) {
     const product = store.createProduct(body);
     return { status: 201, body: product };
   }, { roles: ['PURCHASING'] });
+  
+    router.delete('/products/:productId', async ({ params }) => {
+    const result = store.deleteProduct(params.productId);
+    return { status: 200, body: result };
+  }, { roles: ['PURCHASING'] });
   // ---------------- Forecast (PURCHASING เขียน, MANAGEMENT อ่าน) ----------------
   router.post('/forecast', async ({ body }) => {
     requireFields(body, ['year', 'month', 'productId', 'quantity']);
