@@ -46,6 +46,7 @@ export const api = {
   getProducts: () => request('GET', '/products'),
   getMaterials: () => request('GET', '/materials'),
   getSuppliers: () => request('GET', '/suppliers'),
+  createProduct: (payload) => request('POST', '/products', payload),
 
   // Forecast
   listForecast: (year, month) => request('GET', `/forecast?year=${year}&month=${month}`),
