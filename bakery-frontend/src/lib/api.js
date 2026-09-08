@@ -47,6 +47,7 @@ export const api = {
   getMaterials: () => request('GET', '/materials'),
   getSuppliers: () => request('GET', '/suppliers'),
   createProduct: (payload) => request('POST', '/products', payload),
+  deleteProduct: (productId) => request('DELETE', `/products/${productId}`),
 
   // Forecast
   listForecast: (year, month) => request('GET', `/forecast?year=${year}&month=${month}`),
