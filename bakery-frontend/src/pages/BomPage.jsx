@@ -251,7 +251,7 @@ function BomMaster({ productId, products, materials }) {
   return (
     <div>
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
-        <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">{tree.version}</span>
+        <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">{tree.version || 'ยังไม่มี BOM'}</span>
         <span className="text-xs text-slate-400">ณ {TODAY}</span>
       </div>
 
