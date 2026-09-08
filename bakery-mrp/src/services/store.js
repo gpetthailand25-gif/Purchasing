@@ -552,6 +552,7 @@ function createStore() {
     products,
     materials,
     suppliers,
+    createProduct,
     upsertForecast,
     addForecastAdjustment,
     listForecast,
