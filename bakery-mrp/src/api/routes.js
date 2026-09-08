@@ -28,19 +28,21 @@ function registerRoutes(router, store) {
   const READ_ALL = ['PURCHASING', 'WAREHOUSE', 'MANAGEMENT'];
   router.get('/products', async () => ({ status: 200, body: store.products }), { roles: READ_ALL });
   router.get('/materials', async () => ({ status: 200, body: store.materials }), { roles: READ_ALL });
-  router.get('/suppliers', async () => ({ status: 200, body: store.suppliers }), { roles: READ_ALL });
-
-  router.post('/products', async ({ body }) => {
+  router.post('/materials', async ({ body }) => {
     requireFields(body, ['name', 'type']);
-    const product = store.createProduct(body);
-    return { status: 201, body: product };
+    const material = store.addMaterial(body);
+    return { status: 201, body: material };
   }, { roles: ['PURCHASING'] });
-  
-    router.delete('/products/:productId', async ({ params }) => {
-    const result = store.deleteProduct(params.productId);
+  router.put('/materials/:id', async ({ params, body }) => {
+    const material = store.updateMaterial(params.id, body);
+    return { status: 200, body: material };
+  }, { roles: ['PURCHASING'] });
+  router.delete('/materials/:id', async ({ params }) => {
+    const result = store.removeMaterial(params.id);
     return { status: 200, body: result };
   }, { roles: ['PURCHASING'] });
-  
+  router.get('/suppliers', async () => ({ status: 200, body: store.suppliers }), { roles: READ_ALL });
+
   // ---------------- Forecast (PURCHASING เขียน, MANAGEMENT อ่าน) ----------------
   router.post('/forecast', async ({ body }) => {
     requireFields(body, ['year', 'month', 'productId', 'quantity']);

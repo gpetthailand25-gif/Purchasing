@@ -71,6 +71,9 @@ warning เตือนและใช้ dev secret ชั่วคราวแ
 | POST | `/auth/login` | Public | ขอ Token |
 | GET | `/auth/me` | ทุก Role (Login แล้ว) | ดูข้อมูล User ปัจจุบันจาก Token |
 | GET | `/products`, `/materials`, `/suppliers` | ทุก Role | Master Data |
+| POST | `/materials` | PURCHASING | เพิ่ม Material ใหม่ (RAW/PACKAGING) |
+| PUT | `/materials/:id` | PURCHASING | แก้ไข Material |
+| DELETE | `/materials/:id` | PURCHASING | ลบ Material (Block ถ้ายังถูกใช้ใน BOM) |
 | POST | `/forecast` | PURCHASING | สร้าง/แก้ไข Forecast (เก็บ Version อัตโนมัติ) |
 | GET | `/forecast?year=&month=` | PURCHASING, MANAGEMENT | ดู Forecast ของช่วงเวลา |
 | POST | `/forecast/adjustment` | PURCHASING | เพิ่ม Forecast ระหว่างเดือน |

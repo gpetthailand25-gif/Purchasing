@@ -359,3 +359,52 @@ test('API: RBAC - แต่ละ Role เข้าถึงได้เฉพ�
     assert.equal(adminReceive.status, 200);
   });
 });
+
+test('API: Material Master - Add/Edit/Delete + ป้องกันลบ Material ที่ใช้อยู่ใน BOM', async () => {
+  await withServer(async (base) => {
+    await login(base, 'buyer1', 'buyer123');
+
+    // เพิ่ม Material ใหม่
+    const created = await req(base, 'POST', '/materials', {
+      name: 'ผงโกโก้', type: 'RAW', unit: 'kg', purchaseUnit: 'กล่อง (2kg)', conversionRate: 2, price: 150, safetyStock: 5,
+    });
+    assert.equal(created.status, 201);
+    const newId = created.body.id;
+    assert.match(newId, /^M\d+$/);
+
+    // ต้องปรากฏใน GET /materials
+    const list1 = await req(base, 'GET', '/materials');
+    assert.equal(list1.body[newId].name, 'ผงโกโก้');
+
+    // แก้ไขราคา + Safety Stock
+    const updated = await req(base, 'PUT', `/materials/${newId}`, { price: 160, safetyStock: 8 });
+    assert.equal(updated.status, 200);
+    assert.equal(updated.body.price, 160);
+    assert.equal(updated.body.safetyStock, 8);
+
+    // Warehouse/Management แก้ไม่ได้ (403)
+    const warehouse = (await login(base, 'wh1', 'wh123')).body.token;
+    const whEdit = await req(base, 'PUT', `/materials/${newId}`, { price: 999 }, { token: warehouse });
+    assert.equal(whEdit.status, 403);
+    await login(base, 'buyer1', 'buyer123'); // สลับ token กลับมาเป็น buyer1 สำหรับขั้นตอนถัดไป
+
+    // ลบ Material ที่ไม่ได้ใช้ใน BOM ไหนเลย -> ลบได้
+    const deleted = await req(base, 'DELETE', `/materials/${newId}`);
+    assert.equal(deleted.status, 200);
+    const list2 = await req(base, 'GET', '/materials');
+    assert.equal(list2.body[newId], undefined);
+
+    // พยายามลบ Material ที่ถูกใช้อยู่ใน BOM จริง (M001 แป้ง ใช้ใน P003) -> ต้องโดน Block
+    const blockDelete = await req(base, 'DELETE', '/materials/M001');
+    assert.equal(blockDelete.status, 400);
+    assert.match(blockDelete.body.error, /ลบไม่ได้/);
+
+    // ลบ Material ที่ไม่มีอยู่จริง -> 404
+    const notFound = await req(base, 'DELETE', '/materials/M999');
+    assert.equal(notFound.status, 404);
+
+    // type ผิด -> 400
+    const badType = await req(base, 'POST', '/materials', { name: 'ทดสอบ', type: 'INVALID' });
+    assert.equal(badType.status, 400);
+  });
+});

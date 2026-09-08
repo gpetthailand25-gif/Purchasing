@@ -1,7 +1,7 @@
 import React from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import {
-  LayoutDashboard, ClipboardList, Calculator, Layers, Truck, PackageCheck, LogOut,
+  LayoutDashboard, ClipboardList, Calculator, Layers, Truck, PackageCheck, LogOut, Boxes,
 } from 'lucide-react';
 import { useAuth } from '../lib/auth.jsx';
 
@@ -21,7 +21,10 @@ const NAV_GROUPS = [
   },
   {
     label: 'BOM',
-    items: [['/bom', 'BOM Master / Tree', Layers, ['PURCHASING', 'MANAGEMENT']]],
+    items: [
+      ['/bom', 'BOM Master / Tree', Layers, ['PURCHASING', 'MANAGEMENT']],
+      ['/materials', 'วัตถุดิบ / บรรจุภัณฑ์', Boxes, ['PURCHASING', 'MANAGEMENT']],
+    ],
   },
   {
     label: 'Purchasing',

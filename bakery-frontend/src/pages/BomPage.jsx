@@ -14,12 +14,6 @@ export default function BomPage() {
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [tab, setTab] = useState('master');
   const [search, setSearch] = useState('');
-  const [addingProduct, setAddingProduct] = useState(false);
-  const [newProductId, setNewProductId] = useState('');
-  const [newProductName, setNewProductName] = useState('');
-  const [newProductType, setNewProductType] = useState('FINISHED');
-  const [productError, setProductError] = useState(null);
-  const [deleteError, setDeleteError] = useState(null);
 
   const loadMasterData = useCallback(async () => {
     setError(null);
@@ -36,44 +30,8 @@ export default function BomPage() {
 
   useEffect(() => { loadMasterData(); }, [loadMasterData]);
 
-  async function submitNewProduct() {
-    if (!newProductName.trim()) return;
-    setProductError(null);
-    try {
-      const created = await api.createProduct({
-        productId: newProductId.trim() || undefined,
-        name: newProductName.trim(),
-        type: newProductType,
-      });
-      setProducts((prev) => ({ ...prev, [created.productId]: { name: created.name, type: created.type } }));
-      setSelectedProduct(created.productId);
-      setTab('master');
-      setNewProductId('');
-      setNewProductName('');
-      setNewProductType('FINISHED');
-      setAddingProduct(false);
-    } catch (e) {
-      setProductError(e.message);
-    }
-  }
-
-  async function handleDeleteProduct() {
-    setDeleteError(null);
-    if (!window.confirm(`ยืนยันลบสินค้า "${products[selectedProduct].name}" พร้อม BOM ทั้งหมดของมัน? การลบนี้ย้อนกลับไม่ได้`)) return;
-    try {
-      await api.deleteProduct(selectedProduct);
-      const next = { ...products };
-      delete next[selectedProduct];
-      setProducts(next);
-      const remainingIds = Object.keys(next);
-      setSelectedProduct(remainingIds.length ? remainingIds[0] : null);
-    } catch (e) {
-      setDeleteError(e.message);
-    }
-  }
-
   if (error) return <ErrorState error={error} onRetry={loadMasterData} />;
-  if (!products || !materials) return <LoadingState />;
+  if (!products || !materials || !selectedProduct) return <LoadingState />;
 
   const filtered = Object.entries(products).filter(([, p]) => search === '' || p.name.includes(search));
 
@@ -88,34 +46,6 @@ export default function BomPage() {
             <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ค้นหา Product..."
               className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-8 pr-3 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
-          </div>
-
-          <div className="mt-3">
-            {!addingProduct ? (
-              <button onClick={() => setAddingProduct(true)}
-                className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-amber-300 px-3 py-2 text-xs font-medium text-amber-700 hover:bg-amber-50">
-                <Plus size={14} /> เพิ่มสินค้าใหม่ / BOM ใหม่
-              </button>
-            ) : (
-              <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
-                <select value={newProductType} onChange={(e) => setNewProductType(e.target.value)}
-                  className="w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
-                  <option value="FINISHED">Finished Product</option>
-                  <option value="SEMI_FINISHED">Semi-Finished</option>
-                </select>
-                <input value={newProductId} onChange={(e) => setNewProductId(e.target.value)} placeholder="รหัสสินค้า (ไม่กรอก = สร้างอัตโนมัติ)"
-                  className="mt-2 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
-                <input value={newProductName} onChange={(e) => setNewProductName(e.target.value)} placeholder="ชื่อสินค้า"
-                  className="mt-2 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
-                {productError && <p className="mt-1.5 text-[11px] text-red-600">{productError}</p>}
-                <div className="mt-2 flex justify-end gap-1.5">
-                  <button onClick={() => { setAddingProduct(false); setProductError(null); setNewProductId(''); setNewProductName(''); }}
-                    className="rounded-lg px-2 py-1 text-[11px] font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
-                  <button onClick={submitNewProduct}
-                    className="rounded-lg bg-slate-900 px-2 py-1 text-[11px] font-medium text-white hover:bg-slate-700">สร้าง</button>
-                </div>
-              </div>
-            )}
           </div>
 
           <p className="mb-1.5 mt-4 px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Finished Product</p>
@@ -134,27 +64,10 @@ export default function BomPage() {
         </aside>
 
         <main className="min-w-0 flex-1">
-          {!selectedProduct ? (
-            <div className="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-400">
-              ยังไม่มีสินค้าในระบบ — กด "เพิ่มสินค้าใหม่ / BOM ใหม่" ทางซ้ายเพื่อเริ่มต้น
-            </div>
-          ) : (
-          <>
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <h2 className="font-display text-xl font-semibold text-slate-900">{products[selectedProduct].name}</h2>
-              <p className="text-xs text-slate-400">{selectedProduct} · {products[selectedProduct].type === 'FINISHED' ? 'Finished' : 'กึ่งสำเร็จรูป'}</p>
-            </div>
-            <button onClick={handleDeleteProduct} title="ลบสินค้านี้"
-              className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-red-200 px-2.5 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50">
-              <Trash2 size={13} /> ลบสินค้า
-            </button>
+          <div>
+            <h2 className="font-display text-xl font-semibold text-slate-900">{products[selectedProduct].name}</h2>
+            <p className="text-xs text-slate-400">{selectedProduct} · {products[selectedProduct].type === 'FINISHED' ? 'Finished' : 'กึ่งสำเร็จรูป'}</p>
           </div>
-          {deleteError && (
-            <div className="mt-2 flex items-start gap-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">
-              <AlertTriangle size={14} className="mt-0.5 shrink-0" /> {deleteError}
-            </div>
-          )}
 
           <nav className="mt-4 flex gap-6 border-b border-slate-200 text-sm">
             {[['master', 'BOM Master'], ['tree', 'BOM Tree'], ['whereused', 'Where Used']].map(([key, label]) => (
@@ -174,8 +87,6 @@ export default function BomPage() {
                 jumpTo={(pid) => { setSelectedProduct(pid); setTab('master'); }} />
             )}
           </div>
-          </>
-          )}
         </main>
       </div>
     </div>
@@ -259,7 +170,7 @@ function BomMaster({ productId, products, materials }) {
   return (
     <div>
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
-        <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">{tree.version || 'ยังไม่มี BOM'}</span>
+        <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">{tree.version}</span>
         <span className="text-xs text-slate-400">ณ {TODAY}</span>
       </div>
 

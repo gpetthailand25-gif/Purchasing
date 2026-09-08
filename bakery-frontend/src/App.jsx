@@ -10,6 +10,7 @@ import PoTrackingPage from './pages/PoTrackingPage.jsx';
 import CreatePoPage from './pages/CreatePoPage.jsx';
 import ReceivingPage from './pages/ReceivingPage.jsx';
 import DashboardPage from './pages/DashboardPage.jsx';
+import MaterialsPage from './pages/MaterialsPage.jsx';
 
 function RequireAuth({ children }) {
   const { user, loading } = useAuth();
@@ -35,6 +36,7 @@ export default function App() {
           <Route path="/forecast" element={<ForecastPage />} />
           <Route path="/mrp" element={<MrpPage />} />
           <Route path="/bom" element={<BomPage />} />
+          <Route path="/materials" element={<MaterialsPage />} />
           <Route path="/po" element={<PoTrackingPage />} />
           <Route path="/po/new" element={<CreatePoPage />} />
           <Route path="/receiving" element={<ReceivingPage />} />

@@ -75,17 +75,18 @@ function createStore() {
   };
 
   const materials = {
-    M001: { name: 'แป้ง', safetyStock: 30, conversionRate: 25, price: 27 },
-    M002: { name: 'น้ำตาล', safetyStock: 20, conversionRate: 25, price: 22 },
-    M003: { name: 'ยีสต์', safetyStock: 5, conversionRate: 5, price: 180 },
-    M004: { name: 'เนย', safetyStock: 20, conversionRate: 10, price: 130 },
-    M005: { name: 'นม', safetyStock: 10, conversionRate: 12, price: 45 },
-    M006: { name: 'Packaging', safetyStock: 500, conversionRate: 1, price: 3.5 },
-    M007: { name: 'ไส้หมูหยอง', safetyStock: 5, conversionRate: 1, price: 90 },
-    M008: { name: 'แยม', safetyStock: 5, conversionRate: 1, price: 60 },
-    M009: { name: 'ครีม', safetyStock: 5, conversionRate: 1, price: 95 },
-    M010: { name: 'สังขยา', safetyStock: 5, conversionRate: 1, price: 85 },
+    M001: { name: 'แป้ง', type: 'RAW', unit: 'kg', purchaseUnit: 'กระสอบ (25kg)', safetyStock: 30, conversionRate: 25, price: 27, status: 'ACTIVE' },
+    M002: { name: 'น้ำตาล', type: 'RAW', unit: 'kg', purchaseUnit: 'กระสอบ (25kg)', safetyStock: 20, conversionRate: 25, price: 22, status: 'ACTIVE' },
+    M003: { name: 'ยีสต์', type: 'RAW', unit: 'kg', purchaseUnit: 'กล่อง (5kg)', safetyStock: 5, conversionRate: 5, price: 180, status: 'ACTIVE' },
+    M004: { name: 'เนย', type: 'RAW', unit: 'kg', purchaseUnit: 'กล่อง (10kg)', safetyStock: 20, conversionRate: 10, price: 130, status: 'ACTIVE' },
+    M005: { name: 'นม', type: 'RAW', unit: 'kg', purchaseUnit: 'กล่อง (12kg)', safetyStock: 10, conversionRate: 12, price: 45, status: 'ACTIVE' },
+    M006: { name: 'กล่องบรรจุภัณฑ์', type: 'PACKAGING', unit: 'ชิ้น', purchaseUnit: 'ชิ้น', safetyStock: 500, conversionRate: 1, price: 3.5, status: 'ACTIVE' },
+    M007: { name: 'ไส้หมูหยอง', type: 'RAW', unit: 'kg', purchaseUnit: 'kg', safetyStock: 5, conversionRate: 1, price: 90, status: 'ACTIVE' },
+    M008: { name: 'แยม', type: 'RAW', unit: 'kg', purchaseUnit: 'kg', safetyStock: 5, conversionRate: 1, price: 60, status: 'ACTIVE' },
+    M009: { name: 'ครีม', type: 'RAW', unit: 'kg', purchaseUnit: 'kg', safetyStock: 5, conversionRate: 1, price: 95, status: 'ACTIVE' },
+    M010: { name: 'สังขยา', type: 'RAW', unit: 'kg', purchaseUnit: 'kg', safetyStock: 5, conversionRate: 1, price: 85, status: 'ACTIVE' },
   };
+  let nextMaterialId = 11; // ต่อจาก M010 ที่ Seed ไว้
 
   const stock = {
     M001: 100, M002: 500, M003: 50, M004: 30, M005: 300, M006: 2000,
@@ -151,36 +152,7 @@ function createStore() {
       },
     };
   }
-  // ==== Products (Master Data) ====
-  function createProduct({ productId, name, type }) {
-    if (!name) throw new HttpError(400, 'ขาดข้อมูลที่จำเป็น: name');
-    if (type !== 'FINISHED' && type !== 'SEMI_FINISHED') {
-      throw new HttpError(400, 'type ต้องเป็น FINISHED หรือ SEMI_FINISHED');
-    }
-    let id = productId;
-    if (!id) {
-      const nums = Object.keys(products)
-        .map((k) => /^P(\d+)$/.exec(k))
-        .filter(Boolean)
-        .map((m) => Number(m[1]));
-      const next = (nums.length ? Math.max(...nums) : 0) + 1;
-      id = 'P' + String(next).padStart(3, '0');
-    }
-    if (products[id]) throw new HttpError(400, `มี Product รหัส ${id} อยู่แล้ว`);
-    products[id] = { name, type };
-    return { productId: id, name, type };
-  }
-    function deleteProduct(productId) {
-    if (!products[productId]) throw new HttpError(404, `ไม่พบ Product: ${productId}`);
-    const usedIn = whereUsed('SEMI_FINISHED', productId);
-    if (usedIn.length > 0) {
-      const names = usedIn.map((u) => u.productName).join(', ');
-      throw new HttpError(400, `ลบไม่ได้ เพราะสินค้านี้ถูกใช้เป็น Component อยู่ใน: ${names} — กรุณาลบออกจาก BOM เหล่านั้นก่อน`);
-    }
-    delete boms[productId];
-    delete products[productId];
-    return { productId, deleted: true };
-  }
+
   // ==== Forecast ====
   function upsertForecast({ year, month, productId, quantity, enteredBy, note }) {
     if (!products[productId]) throw new HttpError(400, `ไม่พบ Product: ${productId}`);
@@ -284,6 +256,50 @@ function createStore() {
       throw new HttpError(404, `ไม่พบ Component id=${bomDetailId} ใน BOM ของ ${productId}`);
     }
     return boms[productId];
+  }
+
+  // ==== Material Master ====
+  function addMaterial({ name, type, unit, purchaseUnit, conversionRate, price, safetyStock }) {
+    if (!name) throw new HttpError(400, 'ต้องระบุชื่อ Material');
+    if (!['RAW', 'PACKAGING'].includes(type)) throw new HttpError(400, 'type ต้องเป็น RAW หรือ PACKAGING');
+    const id = 'M' + String(nextMaterialId++).padStart(3, '0');
+    materials[id] = {
+      name,
+      type,
+      unit: unit || 'kg',
+      purchaseUnit: purchaseUnit || unit || 'kg',
+      conversionRate: Number(conversionRate) || 1,
+      price: Number(price) || 0,
+      safetyStock: Number(safetyStock) || 0,
+      status: 'ACTIVE',
+    };
+    stock[id] = 0;
+    return { id, ...materials[id] };
+  }
+
+  function updateMaterial(id, patch) {
+    if (!materials[id]) throw new HttpError(404, `ไม่พบ Material id=${id}`);
+    if (patch.type && !['RAW', 'PACKAGING'].includes(patch.type)) {
+      throw new HttpError(400, 'type ต้องเป็น RAW หรือ PACKAGING');
+    }
+    const allowed = ['name', 'type', 'unit', 'purchaseUnit', 'conversionRate', 'price', 'safetyStock', 'status'];
+    for (const key of allowed) {
+      if (patch[key] !== undefined) {
+        materials[id][key] = ['conversionRate', 'price', 'safetyStock'].includes(key) ? Number(patch[key]) : patch[key];
+      }
+    }
+    return { id, ...materials[id] };
+  }
+
+  function removeMaterial(id) {
+    if (!materials[id]) throw new HttpError(404, `ไม่พบ Material id=${id}`);
+    const usedIn = whereUsed('RAW_MATERIAL', id).concat(whereUsed('PACKAGING', id));
+    if (usedIn.length > 0) {
+      throw new HttpError(400, `ลบไม่ได้ เพราะถูกใช้อยู่ใน BOM ของ: ${usedIn.map((u) => u.productName).join(', ')}`);
+    }
+    delete materials[id];
+    delete stock[id];
+    return { deleted: id };
   }
 
   // ==== Purchase Order / Receiving ====
@@ -563,8 +579,6 @@ function createStore() {
     products,
     materials,
     suppliers,
-    createProduct,
-    deleteProduct,
     upsertForecast,
     addForecastAdjustment,
     listForecast,
@@ -573,6 +587,9 @@ function createStore() {
     whereUsed,
     addBomDetail,
     removeBomDetail,
+    addMaterial,
+    updateMaterial,
+    removeMaterial,
     createPurchaseOrder,
     getPurchaseOrder,
     listPurchaseOrdersTracking,

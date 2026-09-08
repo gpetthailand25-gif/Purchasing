@@ -45,9 +45,10 @@ export const api = {
   // Master data
   getProducts: () => request('GET', '/products'),
   getMaterials: () => request('GET', '/materials'),
+  createMaterial: (payload) => request('POST', '/materials', payload),
+  updateMaterial: (id, payload) => request('PUT', `/materials/${id}`, payload),
+  deleteMaterial: (id) => request('DELETE', `/materials/${id}`),
   getSuppliers: () => request('GET', '/suppliers'),
-  createProduct: (payload) => request('POST', '/products', payload),
-  deleteProduct: (productId) => request('DELETE', `/products/${productId}`),
 
   // Forecast
   listForecast: (year, month) => request('GET', `/forecast?year=${year}&month=${month}`),
@@ -59,14 +60,7 @@ export const api = {
     request('GET', `/mrp?year=${year}&month=${month}${asOfDate ? `&asOfDate=${asOfDate}` : ''}`),
 
   // BOM
-    getBomTree: async (productId, asOfDate) => {
-    try {
-      return await request('GET', `/bom/${productId}?asOfDate=${asOfDate}`);
-    } catch (e) {
-      if (e.status === 404) return { productId, productName: productId, version: null, components: [] };
-      throw e;
-    }
-  },
+  getBomTree: (productId, asOfDate) => request('GET', `/bom/${productId}?asOfDate=${asOfDate}`),
   whereUsed: (type, id) => request('GET', `/bom/where-used/${type}/${id}`),
   addBomDetail: (productId, detail, asOfDate) => request('POST', `/bom/${productId}/detail?asOfDate=${asOfDate}`, detail),
   removeBomDetail: (productId, bomDetailId) => request('DELETE', `/bom/${productId}/detail/${bomDetailId}`),
