@@ -169,7 +169,7 @@ function createStore() {
     if (products[id]) throw new HttpError(400, `มี Product รหัส ${id} อยู่แล้ว`);
     products[id] = { name, type };
     return { productId: id, name, type };
-  }v
+  }
     function deleteProduct(productId) {
     if (!products[productId]) throw new HttpError(404, `ไม่พบ Product: ${productId}`);
     const usedIn = whereUsed('SEMI_FINISHED', productId);
@@ -180,7 +180,7 @@ function createStore() {
     delete boms[productId];
     delete products[productId];
     return { productId, deleted: true };
-  }v
+  }
   // ==== Forecast ====
   function upsertForecast({ year, month, productId, quantity, enteredBy, note }) {
     if (!products[productId]) throw new HttpError(400, `ไม่พบ Product: ${productId}`);
