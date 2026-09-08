@@ -1,0 +1,14 @@
+{
+  "name": "bakery-purchasing-mrp-bom",
+  "version": "0.1.0",
+  "description": "Calculation Engine (BOM Explosion + MRP) สำหรับระบบจัดซื้อโรงงานเบเกอรี่ - Phase 1 ของ Implementation",
+  "main": "src/engine/mrpCalculation.js",
+  "scripts": {
+    "test": "node --test test/engine.test.js test/repository.test.js test/api.test.js",
+    "start": "node src/api/server.js"
+  },
+  "dependencies": {
+    "pg": "^8.11.0"
+  },
+  "license": "UNLICENSED"
+}
