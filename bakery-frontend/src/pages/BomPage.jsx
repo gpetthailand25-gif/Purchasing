@@ -18,6 +18,7 @@ export default function BomPage() {
   const [newProductName, setNewProductName] = useState('');
   const [newProductType, setNewProductType] = useState('FINISHED');
   const [productError, setProductError] = useState(null);
+  const [deleteError, setDeleteError] = useState(null);
 
   const loadMasterData = useCallback(async () => {
     setError(null);
@@ -50,8 +51,23 @@ export default function BomPage() {
     }
   }
 
+  async function handleDeleteProduct() {
+    setDeleteError(null);
+    if (!window.confirm(`ยืนยันลบสินค้า "${products[selectedProduct].name}" พร้อม BOM ทั้งหมดของมัน? การลบนี้ย้อนกลับไม่ได้`)) return;
+    try {
+      await api.deleteProduct(selectedProduct);
+      const next = { ...products };
+      delete next[selectedProduct];
+      setProducts(next);
+      const remainingIds = Object.keys(next);
+      setSelectedProduct(remainingIds.length ? remainingIds[0] : null);
+    } catch (e) {
+      setDeleteError(e.message);
+    }
+  }
+
   if (error) return <ErrorState error={error} onRetry={loadMasterData} />;
-  if (!products || !materials || !selectedProduct) return <LoadingState />;
+  if (!products || !materials) return <LoadingState />;
 
   const filtered = Object.entries(products).filter(([, p]) => search === '' || p.name.includes(search));
 
@@ -110,10 +126,27 @@ export default function BomPage() {
         </aside>
 
         <main className="min-w-0 flex-1">
-          <div>
-            <h2 className="font-display text-xl font-semibold text-slate-900">{products[selectedProduct].name}</h2>
-            <p className="text-xs text-slate-400">{selectedProduct} · {products[selectedProduct].type === 'FINISHED' ? 'Finished' : 'กึ่งสำเร็จรูป'}</p>
+          {!selectedProduct ? (
+            <div className="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-400">
+              ยังไม่มีสินค้าในระบบ — กด "เพิ่มสินค้าใหม่ / BOM ใหม่" ทางซ้ายเพื่อเริ่มต้น
+            </div>
+          ) : (
+          <>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="font-display text-xl font-semibold text-slate-900">{products[selectedProduct].name}</h2>
+              <p className="text-xs text-slate-400">{selectedProduct} · {products[selectedProduct].type === 'FINISHED' ? 'Finished' : 'กึ่งสำเร็จรูป'}</p>
+            </div>
+            <button onClick={handleDeleteProduct} title="ลบสินค้านี้"
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-red-200 px-2.5 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50">
+              <Trash2 size={13} /> ลบสินค้า
+            </button>
           </div>
+          {deleteError && (
+            <div className="mt-2 flex items-start gap-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">
+              <AlertTriangle size={14} className="mt-0.5 shrink-0" /> {deleteError}
+            </div>
+          )}
 
           <nav className="mt-4 flex gap-6 border-b border-slate-200 text-sm">
             {[['master', 'BOM Master'], ['tree', 'BOM Tree'], ['whereused', 'Where Used']].map(([key, label]) => (
@@ -133,6 +166,8 @@ export default function BomPage() {
                 jumpTo={(pid) => { setSelectedProduct(pid); setTab('master'); }} />
             )}
           </div>
+          </>
+          )}
         </main>
       </div>
     </div>
