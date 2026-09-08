@@ -38,6 +38,10 @@ jobs:
           VITE_API_BASE: ${{ secrets.VITE_API_BASE_URL }}
         run: npm run build
 
+      - name: Copy index.html to 404.html (SPA fallback for GitHub Pages)
+        working-directory: bakery-frontend
+        run: cp dist/index.html dist/404.html
+
       - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3
