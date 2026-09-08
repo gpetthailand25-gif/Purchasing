@@ -59,7 +59,14 @@ export const api = {
     request('GET', `/mrp?year=${year}&month=${month}${asOfDate ? `&asOfDate=${asOfDate}` : ''}`),
 
   // BOM
-  getBomTree: (productId, asOfDate) => request('GET', `/bom/${productId}?asOfDate=${asOfDate}`),
+    getBomTree: async (productId, asOfDate) => {
+    try {
+      return await request('GET', `/bom/${productId}?asOfDate=${asOfDate}`);
+    } catch (e) {
+      if (e.status === 404) return { productId, productName: productId, version: null, components: [] };
+      throw e;
+    }
+  },
   whereUsed: (type, id) => request('GET', `/bom/where-used/${type}/${id}`),
   addBomDetail: (productId, detail, asOfDate) => request('POST', `/bom/${productId}/detail?asOfDate=${asOfDate}`, detail),
   removeBomDetail: (productId, bomDetailId) => request('DELETE', `/bom/${productId}/detail/${bomDetailId}`),
