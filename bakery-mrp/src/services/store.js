@@ -151,7 +151,25 @@ function createStore() {
       },
     };
   }
-
+  // ==== Products (Master Data) ====
+  function createProduct({ productId, name, type }) {
+    if (!name) throw new HttpError(400, 'ขาดข้อมูลที่จำเป็น: name');
+    if (type !== 'FINISHED' && type !== 'SEMI_FINISHED') {
+      throw new HttpError(400, 'type ต้องเป็น FINISHED หรือ SEMI_FINISHED');
+    }
+    let id = productId;
+    if (!id) {
+      const nums = Object.keys(products)
+        .map((k) => /^P(\d+)$/.exec(k))
+        .filter(Boolean)
+        .map((m) => Number(m[1]));
+      const next = (nums.length ? Math.max(...nums) : 0) + 1;
+      id = 'P' + String(next).padStart(3, '0');
+    }
+    if (products[id]) throw new HttpError(400, `มี Product รหัส ${id} อยู่แล้ว`);
+    products[id] = { name, type };
+    return { productId: id, name, type };
+  }v
   // ==== Forecast ====
   function upsertForecast({ year, month, productId, quantity, enteredBy, note }) {
     if (!products[productId]) throw new HttpError(400, `ไม่พบ Product: ${productId}`);
