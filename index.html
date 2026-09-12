@@ -1668,6 +1668,7 @@ const THAI_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.
 const ICONS = {
   plus: <><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></>,
   x: <><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></>,
+  menu: <><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></>,
   check: <polyline points="4 12 9 17 20 6" />,
   checkCircle: <><circle cx="12" cy="12" r="9" /><polyline points="8 12.5 11 15.5 16 9" /></>,
   chevronDown: <polyline points="6 9 12 15 18 9" />,
@@ -1750,10 +1751,10 @@ function ErrorBox({ message, onRetry }) {
 
 function PageHeader({ title, year, month, onYear, onMonth }) {
   return (
-    <div className="flex items-center justify-between">
+    <div className="flex flex-wrap items-center justify-between gap-3">
       <div>
         <p className="font-display text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing</p>
-        <h1 className="font-display mt-1 text-2xl font-semibold text-slate-900">{title}</h1>
+        <h1 className="font-display mt-1 text-xl font-semibold text-slate-900 sm:text-2xl">{title}</h1>
       </div>
       {onMonth && (
         <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5">
@@ -1829,7 +1830,7 @@ function DashboardTab({ store, tick }) {
   return (
     <div>
       <p className="font-display text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing · Dashboard</p>
-      <h1 className="font-display mt-1 text-2xl font-semibold text-slate-900">Dashboard</h1>
+      <h1 className="font-display mt-1 text-xl font-semibold text-slate-900 sm:text-2xl">Dashboard</h1>
       <nav className="mt-5 flex gap-6 border-b border-slate-200 text-sm">
         {[['purchasing', 'Purchasing Dashboard'], ['executive', 'Executive Dashboard']].map(([key, label]) => (
           <button key={key} onClick={() => setSubTab(key)} className={`relative pb-3 font-medium transition-colors ${subTab === key ? 'text-slate-900' : 'text-slate-400 hover:text-slate-600'}`}>
@@ -1890,7 +1891,7 @@ function PurchasingDashboard({ store }) {
       </div>
       <div className="mt-6">
         <h3 className="text-sm font-semibold text-slate-700">Material เสี่ยงขาด (ต่ำกว่า Safety Stock)</h3>
-        <div className="mt-2 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="mt-2 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
           <table className="w-full text-sm">
             <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">Material</th><th className="px-4 py-3 text-right">Stock</th><th className="px-4 py-3 text-right">Safety Stock</th><th className="px-4 py-3">สถานะ</th></tr></thead>
             <tbody>
@@ -1915,7 +1916,7 @@ function HBarList({ items, valueFmt = fmtBaht, color = 'bg-slate-500', emptyText
   if (!items || items.length === 0) return <div className="rounded-xl border border-dashed border-slate-200 bg-white px-4 py-6 text-center text-xs text-slate-400">{emptyText}</div>;
   const max = Math.max(...items.map((d) => d.value), 1);
   return (
-    <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+    <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
       <table className="w-full text-sm">
         <tbody>
           {items.map((d, i) => (
@@ -2110,7 +2111,7 @@ function ForecastTab({ store, refresh }) {
   return (
     <div>
       <PageHeader title="Forecast ประจำเดือน" year={year} month={month} onYear={setYear} onMonth={setMonth} />
-      <div className="mt-6 flex items-center justify-between">
+      <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-slate-500">ระบบเก็บ Version ทุกครั้งที่แก้ไข Forecast ไม่ทับของเดิม</p>
         <button onClick={openAddForm} className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-2 text-sm font-medium text-white transition hover:bg-slate-700"><Icon name="plus" size={16} /> เพิ่ม Forecast</button>
       </div>
@@ -2140,7 +2141,7 @@ function ForecastTab({ store, refresh }) {
           </div>
         </div>
       )}
-      <div className="mt-6 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      <div className="mt-6 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
           <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-5 py-3">Product</th><th className="px-5 py-3 text-right">Forecast ปัจจุบัน</th><th className="px-5 py-3 text-right">เดิม</th><th className="px-5 py-3 text-right">เพิ่มระหว่างเดือน</th><th className="px-5 py-3">Version</th><th className="px-5 py-3"></th></tr></thead>
           <tbody>
@@ -2383,7 +2384,7 @@ function MrpMonthSummary({ summary, showDetail, setShowDetail }) {
         <KpiCard label="สั่งซื้อจริง — PO ในระบบ" value={fmtBaht(actualPo.totalValue)} suffix={`${actualPo.count} PO`} />
         <KpiCard label="สั่งซื้อจริง — บันทึกจาก MRP" value={fmtBaht(actualLog.totalValue)} suffix={`${actualLog.count} รายการ`} />
       </div>
-      <div className="mt-2 flex items-center justify-between">
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs text-slate-400">รวมสั่งซื้อจริงทั้งหมดเดือนนี้ (PO + บันทึกจาก MRP) ≈ <span className="font-semibold text-slate-600">{fmtBaht(actualTotal)}</span></p>
         <button onClick={() => setShowDetail((v) => !v)} className="text-xs font-medium text-amber-700 hover:underline">{showDetail ? 'ซ่อนรายละเอียด' : 'ดูรายละเอียด Forecast / สั่งจริง'}</button>
       </div>
@@ -2391,7 +2392,7 @@ function MrpMonthSummary({ summary, showDetail, setShowDetail }) {
         <div className="mt-3 grid grid-cols-1 gap-4 lg:grid-cols-2">
           <div>
             <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Forecast ตามสินค้า</h4>
-            <div className="mt-2 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+            <div className="mt-2 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
               <table className="w-full text-sm">
                 <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-2">สินค้า</th><th className="px-4 py-2 text-right">จำนวน</th><th className="px-4 py-2 text-right">มูลค่า</th></tr></thead>
                 <tbody>
@@ -2409,7 +2410,7 @@ function MrpMonthSummary({ summary, showDetail, setShowDetail }) {
           </div>
           <div>
             <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">สั่งซื้อจริง (บันทึกจาก MRP) ตามวัตถุดิบ</h4>
-            <div className="mt-2 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+            <div className="mt-2 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
               <table className="w-full text-sm">
                 <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-2">วัตถุดิบ</th><th className="px-4 py-2 text-right">จำนวน</th><th className="px-4 py-2 text-right">มูลค่า</th></tr></thead>
                 <tbody>
@@ -2435,7 +2436,7 @@ function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actua
   return (
     <div className="mt-6">
       <h3 className="text-sm font-semibold text-slate-700">{title}</h3>
-      <div className="mt-2 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      <div className="mt-2 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
           <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">Material</th><th className="px-4 py-3 text-right">Gross</th><th className="px-4 py-3 text-right">Stock</th><th className="px-4 py-3 text-right">Open PO</th><th className="px-4 py-3 text-right">Safety Stock</th><th className="px-4 py-3 text-right">Net Requirement</th><th className="px-4 py-3 text-right" title="ปริมาณที่ต้องสั่งซื้อ แปลงเป็นหน่วยที่ใช้สั่งซื้อจริง">ต้องซื้อ (หน่วยซื้อ)</th><th className="px-4 py-3 text-right">สั่งจริง</th><th className="px-4 py-3">สถานะ</th></tr></thead>
           <tbody>
@@ -2585,11 +2586,11 @@ function ActualOrderHistory({ store, refresh }) {
 
   return (
     <div className="mt-8">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-semibold text-slate-700">ประวัติการสั่งจริง</h3>
         <span className="text-xs text-slate-500">{logs.length} รายการ • รวม {fmtBaht(totalValue)}</span>
       </div>
-      <div className="mt-2 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      <div className="mt-2 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500">
@@ -2721,7 +2722,7 @@ function BomTab({ store, refresh }) {
   return (
     <div>
       <p className="font-display text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing · BOM</p>
-      <h1 className="font-display mt-1 text-2xl font-semibold text-slate-900">BOM Master / Tree / Where Used</h1>
+      <h1 className="font-display mt-1 text-xl font-semibold text-slate-900 sm:text-2xl">BOM Master / Tree / Where Used</h1>
       <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-[280px_1fr]">
         <div>
           <div className="relative"><Icon name="search" size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -2777,7 +2778,7 @@ function BomTab({ store, refresh }) {
             <div className="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-400">ยังไม่มีสินค้าในระบบ — กด "เพิ่มสินค้าใหม่ / BOM ใหม่" ทางซ้ายเพื่อเริ่มต้น</div>
           ) : (
             <>
-              <div className="flex items-start justify-between gap-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
                 {!editingProduct ? (
                   <>
                     <div>
@@ -2791,8 +2792,8 @@ function BomTab({ store, refresh }) {
                   </>
                 ) : (
                   <div className="flex flex-wrap items-end gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
-                    <div><label className="text-xs text-slate-500">รหัสสินค้า</label><input value={selectedProduct} disabled className="mt-1 block w-28 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-sm text-slate-400 outline-none" /></div>
-                    <div><label className="text-xs text-slate-500">ชื่อสินค้า</label><input value={productDraft.name} onChange={(e) => setProductDraft((d) => ({ ...d, name: e.target.value }))} className="mt-1 block w-64 rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+                    <div><label className="text-xs text-slate-500">รหัสสินค้า</label><input value={selectedProduct} disabled className="mt-1 block w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-sm text-slate-400 outline-none sm:w-28" /></div>
+                    <div><label className="text-xs text-slate-500">ชื่อสินค้า</label><input value={productDraft.name} onChange={(e) => setProductDraft((d) => ({ ...d, name: e.target.value }))} className="mt-1 block w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 sm:w-64" /></div>
                     <div><label className="text-xs text-slate-500">ประเภท</label>
                       <select value={productDraft.type} onChange={(e) => setProductDraft((d) => ({ ...d, type: e.target.value }))} className="mt-1 block rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
                         <option value="FINISHED">Finished Product</option>
@@ -3059,7 +3060,7 @@ function BomMaster({ productId, products, materials, store, refresh }) {
           <button onClick={doCopyBom} disabled={!copySourceId} className="rounded-lg bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-40">คัดลอกมาที่นี่</button>
         </div>
       )}
-      <div className="mt-4 overflow-hidden rounded-t-xl border border-b-0 border-slate-200 bg-white shadow-sm">
+      <div className="mt-4 overflow-x-auto rounded-t-xl border border-b-0 border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
           <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">Component</th><th className="px-4 py-3 text-right">Quantity</th><th className="px-4 py-3">Unit</th><th className="px-4 py-3"></th></tr></thead>
           <tbody>
@@ -3298,15 +3299,15 @@ function MaterialsTab({ store, refresh }) {
   return (
     <div>
       <p className="font-display text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing · Master Data</p>
-      <h1 className="font-display mt-1 text-2xl font-semibold text-slate-900">Materials Master (วัตถุดิบ / บรรจุภัณฑ์)</h1>
-      <div className="mt-6 flex items-center justify-between gap-3">
-        <div className="relative w-72"><Icon name="search" size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+      <h1 className="font-display mt-1 text-xl font-semibold text-slate-900 sm:text-2xl">Materials Master (วัตถุดิบ / บรรจุภัณฑ์)</h1>
+      <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
+        <div className="relative w-full sm:w-72"><Icon name="search" size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ค้นหารายการ / รหัส..." className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-8 pr-3 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <input ref={fileInputRef} type="file" accept=".csv,.xlsx,.xls" onChange={handleStockFile} className="hidden" id="stock-upload-input" />
           <button onClick={() => fileInputRef.current && fileInputRef.current.click()} disabled={stockImportBusy} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">
-            <Icon name="upload" size={14} /> {stockImportBusy ? 'กำลังนำเข้า...' : 'อัพโหลดสต็อกคงเหลือ (Excel/CSV)'}
+            <Icon name="upload" size={14} /> {stockImportBusy ? 'กำลังนำเข้า...' : 'อัพโหลดสต็อก'}
           </button>
           {!adding && <button onClick={() => { setAdding(true); setFormError(null); }} className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-2 text-xs font-medium text-white hover:bg-slate-700"><Icon name="plus" size={14} /> เพิ่มรายการใหม่</button>}
         </div>
@@ -3353,7 +3354,7 @@ function MaterialsTab({ store, refresh }) {
           </div>
         </div>
       )}
-      <div className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      <div className="mt-4 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
           <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">รหัส</th><th className="px-4 py-3">รายการ</th><th className="px-4 py-3">ประเภท</th><th className="px-4 py-3">หน่วย BOM</th><th className="px-4 py-3">หน่วยซื้อ / อัตราแปลง</th><th className="px-4 py-3 text-right">ราคา/หน่วย</th><th className="px-4 py-3 text-right">สต็อกคงเหลือ</th><th className="px-4 py-3">สถานะ</th><th className="px-4 py-3"></th></tr></thead>
           <tbody>
@@ -3462,8 +3463,8 @@ function PoTab({ store, refresh }) {
 
   return (
     <div>
-      <div className="flex items-center justify-between">
-        <div><p className="font-display text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing</p><h1 className="font-display mt-1 text-2xl font-semibold text-slate-900">PO Tracking</h1></div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div><p className="font-display text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing</p><h1 className="font-display mt-1 text-xl font-semibold text-slate-900 sm:text-2xl">PO Tracking</h1></div>
         <button onClick={() => setCreating(true)} className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-amber-700"><Icon name="plus" size={16} /> สร้าง PO</button>
       </div>
       <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -3472,7 +3473,7 @@ function PoTab({ store, refresh }) {
         <KpiCard label="PO เกินกำหนด (Overdue)" value={overdueCount} suffix="ใบ" tone={overdueCount > 0 ? 'critical' : 'ok'} />
       </div>
       {deleteError && <div className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{deleteError}</div>}
-      <div className="mt-6 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      <div className="mt-6 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
           <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">PO</th><th className="px-4 py-3">Supplier</th><th className="px-4 py-3 text-right">Ordered</th><th className="px-4 py-3 text-right">Received</th><th className="px-4 py-3 text-right">Outstanding</th><th className="px-4 py-3 text-right">มูลค่า</th><th className="px-4 py-3">กำหนดส่ง</th><th className="px-4 py-3">สถานะ</th><th className="px-4 py-3 text-right">จัดการ</th></tr></thead>
           <tbody>
@@ -3519,10 +3520,12 @@ function PoTab({ store, refresh }) {
                     <tr className="bg-slate-50/40"><td colSpan={9} className="px-4 py-4">
                       <div className="rounded-lg border border-slate-200 bg-white p-4">
                         <div className="mb-3 h-1.5 w-full overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${progress >= 100 ? 'bg-emerald-500' : 'bg-amber-500'}`} style={{ width: `${Math.min(100, progress)}%` }} /></div>
+                        <div className="overflow-x-auto">
                         <table className="w-full text-xs">
                           <thead><tr className="text-left text-slate-400"><th className="pb-2">Material</th><th className="pb-2 text-right">Ordered</th><th className="pb-2 text-right">Received</th><th className="pb-2 text-right">Outstanding</th><th className="pb-2">สถานะ</th></tr></thead>
                           <tbody>{po.lines.map((l, i) => <tr key={i} className="border-t border-slate-100"><td className="py-2 font-medium text-slate-700">{materials[l.materialId]?.name}</td><td className="py-2 text-right tabular">{fmt(l.orderedQty)}</td><td className="py-2 text-right tabular">{fmt(l.receivedQty)}</td><td className="py-2 text-right tabular font-medium">{fmt(l.outstanding)}</td><td className="py-2 text-slate-500">{l.status}</td></tr>)}</tbody>
                         </table>
+                        </div>
                       </div>
                     </td></tr>
                   )}
@@ -3576,7 +3579,7 @@ function CreatePoForm({ store, suppliers, materials, onDone, onCancel, editPo = 
   return (
     <div>
       <p className="font-display text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing</p>
-      <h1 className="font-display mt-1 text-2xl font-semibold text-slate-900">{isEdit ? `แก้ไข Purchase Order · ${editPo.poNumber}` : 'สร้าง Purchase Order'}</h1>
+      <h1 className="font-display mt-1 text-xl font-semibold text-slate-900 sm:text-2xl">{isEdit ? `แก้ไข Purchase Order · ${editPo.poNumber}` : 'สร้าง Purchase Order'}</h1>
       <div className="mt-6 rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div><label className="text-xs font-medium text-slate-500">Supplier</label>
@@ -3592,8 +3595,8 @@ function CreatePoForm({ store, suppliers, materials, onDone, onCancel, editPo = 
             {lines.map((l, i) => {
               const locked = isEdit && (l.receivedQty || 0) > 0;
               return (
-                <div key={i} className="flex items-center gap-2 rounded-lg bg-slate-50 p-2.5">
-                  <div className="w-64">
+                <div key={i} className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 p-2.5">
+                  <div className="w-full sm:w-64">
                     {locked ? (
                       <div className="rounded-lg border border-slate-200 bg-slate-100 px-3 py-1.5 text-sm text-slate-600">{materials[l.materialId]?.name || l.materialId}</div>
                     ) : (
@@ -3605,12 +3608,14 @@ function CreatePoForm({ store, suppliers, materials, onDone, onCancel, editPo = 
                       />
                     )}
                   </div>
-                  <input type="number" placeholder="จำนวน" min={l.receivedQty || 0} value={l.orderedQty} onChange={(e) => updateLine(i, { orderedQty: e.target.value })} className="w-28 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
-                  <span className="text-slate-300">×</span>
-                  <input type="number" value={l.unitPrice} onChange={(e) => updateLine(i, { unitPrice: e.target.value })} className="w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
-                  <span className="ml-auto text-sm tabular font-medium text-slate-700">{fmtBaht((Number(l.orderedQty) || 0) * (Number(l.unitPrice) || 0))}</span>
-                  {locked && <span className="text-[10px] text-slate-400">รับแล้ว {fmt(l.receivedQty)}</span>}
-                  {lines.length > 1 && !locked && <button onClick={() => removeLine(i)} className="text-slate-300 hover:text-red-500"><Icon name="trash" size={14} /></button>}
+                  <div className="flex flex-1 flex-wrap items-center gap-2">
+                    <input type="number" placeholder="จำนวน" min={l.receivedQty || 0} value={l.orderedQty} onChange={(e) => updateLine(i, { orderedQty: e.target.value })} className="w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 sm:w-28" />
+                    <span className="text-slate-300">×</span>
+                    <input type="number" value={l.unitPrice} onChange={(e) => updateLine(i, { unitPrice: e.target.value })} className="w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 sm:w-24" />
+                    <span className="ml-auto text-sm tabular font-medium text-slate-700">{fmtBaht((Number(l.orderedQty) || 0) * (Number(l.unitPrice) || 0))}</span>
+                    {locked && <span className="text-[10px] text-slate-400">รับแล้ว {fmt(l.receivedQty)}</span>}
+                    {lines.length > 1 && !locked && <button onClick={() => removeLine(i)} className="text-slate-300 hover:text-red-500"><Icon name="trash" size={14} /></button>}
+                  </div>
                 </div>
               );
             })}
@@ -3618,7 +3623,7 @@ function CreatePoForm({ store, suppliers, materials, onDone, onCancel, editPo = 
           <button onClick={addLine} className="mt-2 inline-flex items-center gap-1.5 text-sm font-medium text-amber-700 hover:text-amber-800"><Icon name="plus" size={14} /> เพิ่มรายการ</button>
         </div>
         {submitError && <div className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{submitError}</div>}
-        <div className="mt-5 flex items-center justify-between border-t border-slate-100 pt-4">
+        <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4">
           <div className="text-sm text-slate-500">มูลค่ารวม <span className="font-display ml-1 text-lg font-semibold tabular text-slate-900">{fmtBaht(total)}</span></div>
           <div className="flex gap-2">
             <button onClick={onCancel} className="rounded-lg px-3.5 py-2 text-sm font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
@@ -3643,21 +3648,49 @@ const TABS = [
   ['po', 'PO Tracking', 'truck', PoTab],
 ];
 
-function Sidebar({ activeTab, setActiveTab }) {
+function Sidebar({ activeTab, setActiveTab, mobileOpen, setMobileOpen }) {
+  function selectTab(key) {
+    setActiveTab(key);
+    setMobileOpen(false);
+  }
   return (
-    <aside className="no-print w-56 shrink-0 border-r border-slate-200 bg-white px-3 py-5">
-      <div className="px-2">
-        <p className="font-display text-[10px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery</p>
-        <p className="font-display text-lg font-semibold text-slate-900">Purchasing · MRP</p>
-      </div>
-      <nav className="mt-6 space-y-1">
-        {TABS.map(([key, label, icon]) => (
-          <button key={key} onClick={() => setActiveTab(key)} className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition ${activeTab === key ? 'bg-amber-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>
-            <Icon name={icon} size={16} /> {label}
+    <>
+      {mobileOpen && (
+        <div className="no-print fixed inset-0 z-40 bg-slate-900/40 lg:hidden" onClick={() => setMobileOpen(false)} />
+      )}
+      <aside className={`no-print fixed inset-y-0 left-0 z-50 w-64 shrink-0 transform overflow-y-auto border-r border-slate-200 bg-white px-3 py-5 transition-transform duration-200 ease-out lg:static lg:z-auto lg:w-56 lg:translate-x-0 ${mobileOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+        <div className="flex items-center justify-between px-2">
+          <div>
+            <p className="font-display text-[10px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery</p>
+            <p className="font-display text-lg font-semibold text-slate-900">Purchasing · MRP</p>
+          </div>
+          <button onClick={() => setMobileOpen(false)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 lg:hidden" aria-label="ปิดเมนู">
+            <Icon name="x" size={18} />
           </button>
-        ))}
-      </nav>
-    </aside>
+        </div>
+        <nav className="mt-6 space-y-1">
+          {TABS.map(([key, label, icon]) => (
+            <button key={key} onClick={() => selectTab(key)} className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-medium transition ${activeTab === key ? 'bg-amber-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>
+              <Icon name={icon} size={16} /> {label}
+            </button>
+          ))}
+        </nav>
+      </aside>
+    </>
+  );
+}
+
+function MobileTopBar({ title, onMenuClick }) {
+  return (
+    <div className="no-print sticky top-0 z-30 flex items-center gap-3 border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur lg:hidden">
+      <button onClick={onMenuClick} className="rounded-lg p-1.5 text-slate-600 hover:bg-slate-100" aria-label="เปิดเมนู">
+        <Icon name="menu" size={20} />
+      </button>
+      <div>
+        <p className="font-display text-[9px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing</p>
+        <p className="font-display text-sm font-semibold leading-tight text-slate-900">{title}</p>
+      </div>
+    </div>
   );
 }
 
@@ -3678,6 +3711,7 @@ function App() {
   const [ready, setReady] = useState(false);
   const [, setTick] = useState(0);
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const refresh = useCallback(() => setTick((t) => t + 1), []);
 
   useEffect(() => {
@@ -3709,10 +3743,13 @@ function App() {
 
   return (
     <div className="flex min-h-screen">
-      <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} />
-      <main className="min-w-0 flex-1 p-8">
-        <ActiveComponent store={store} refresh={refresh} />
-      </main>
+      <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} mobileOpen={mobileNavOpen} setMobileOpen={setMobileNavOpen} />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <MobileTopBar title={activeEntry[1]} onMenuClick={() => setMobileNavOpen(true)} />
+        <main className="min-w-0 flex-1 p-4 sm:p-6 lg:p-8">
+          <ActiveComponent store={store} refresh={refresh} />
+        </main>
+      </div>
     </div>
   );
 }
