@@ -14,10 +14,20 @@
   body { font-family: 'Noto Sans Thai', sans-serif; }
   .tabular { font-variant-numeric: tabular-nums; }
   .font-display { font-family: 'Noto Sans Thai', sans-serif; }
+  @media print {
+    .no-print { display: none !important; }
+    body { background: #fff !important; }
+    main { padding: 0 !important; }
+    .print-area { display: block !important; }
+    table { page-break-inside: auto; }
+    tr { page-break-inside: avoid; page-break-after: auto; }
+    @page { size: A4 landscape; margin: 10mm; }
+  }
 </style>
 <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+<script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
 </head>
@@ -981,10 +991,22 @@ function createStore() {
   const forecasts = new Map();
   const purchaseOrders = [];
   const priceHistory = [];
+  const actualOrderLogs = [];
   let nextPoId = 1;
   let nextBomDetailId = 1000;
+  let nextLogId = 1;
 
   function forecastKey(year, month, productId) { return year + '-' + month + '-' + productId; }
+
+  // ราคาต่อ "หน่วยฐาน" ของ BOM (เช่น กรัม/ชิ้น) — ข้อมูล price ที่กรอกไว้เป็นราคาต่อหน่วยซื้อ (เช่น ลัง/กระสอบ/ถุง)
+  // จึงต้องหารด้วย conversionRate (จำนวนหน่วยฐานต่อ 1 หน่วยซื้อ) ก่อนนำไปคูณกับปริมาณที่เป็นหน่วยฐานเสมอ
+  function materialUnitCost(id) {
+    const m = materials[id];
+    if (!m) return 0;
+    const rate = Number(m.conversionRate) || 1;
+    const price = Number(m.price) || 0;
+    return rate > 0 ? price / rate : price;
+  }
 
   function toEngineRepo(asOfDate) {
     return {
@@ -1006,7 +1028,7 @@ function createStore() {
       getOpenProductionQty() { return 0; },
       getScheduledReceipt() { return 0; },
       getConversionRate(id) { return (materials[id] && materials[id].conversionRate) || 1; },
-      getMaterialPrice(id) { return (materials[id] && materials[id].price) || 0; },
+      getMaterialPrice(id) { return materialUnitCost(id); },
       getSemiFinishedChildren(productId) {
         const bom = boms[productId];
         if (!bom) return [];
@@ -1263,6 +1285,167 @@ function createStore() {
     return po;
   }
 
+  function updatePurchaseOrder(poId, { supplierId, expectedDeliveryDate, lines } = {}) {
+    const po = getPurchaseOrder(poId);
+    if (po.status === 'RECEIVED') throw new HttpError(400, 'ไม่สามารถแก้ไข PO ที่รับสินค้าครบแล้วได้');
+    if (po.status === 'CANCELLED') throw new HttpError(400, 'ไม่สามารถแก้ไข PO ที่ถูกยกเลิกได้');
+    if (supplierId !== undefined) po.supplierId = supplierId;
+    if (expectedDeliveryDate !== undefined) po.expectedDeliveryDate = expectedDeliveryDate;
+    if (Array.isArray(lines)) {
+      const newLines = lines.map((l) => {
+        const existing = po.lines.find((el) => el.materialId === l.materialId);
+        const receivedQty = existing ? existing.receivedQty : 0;
+        const orderedQty = Number(l.orderedQty);
+        if (orderedQty < receivedQty) {
+          throw new HttpError(400, 'จำนวนสั่งซื้อของ ' + (materials[l.materialId]?.name || l.materialId) + ' ต้องไม่น้อยกว่าจำนวนที่รับแล้ว (' + receivedQty + ')');
+        }
+        const material = materials[l.materialId];
+        const unitPrice = Number(l.unitPrice);
+        if (material && material.price !== unitPrice) {
+          priceHistory.push({ materialId: l.materialId, supplierId: po.supplierId, fromPrice: material.price, toPrice: unitPrice, date: new Date().toISOString().slice(0, 10) });
+          material.price = unitPrice;
+        }
+        return { materialId: l.materialId, orderedQty, unitPrice, receivedQty };
+      });
+      po.lines = newLines;
+      const allReceived = po.lines.every((l) => l.receivedQty >= l.orderedQty && l.orderedQty > 0);
+      const anyReceived = po.lines.some((l) => l.receivedQty > 0);
+      po.status = allReceived ? 'RECEIVED' : anyReceived ? 'PARTIALLY_RECEIVED' : 'APPROVED';
+    }
+    return po;
+  }
+
+  function deletePurchaseOrder(poId) {
+    const idx = purchaseOrders.findIndex((p) => p.poId === Number(poId));
+    if (idx === -1) throw new HttpError(404, 'ไม่พบ PO id=' + poId);
+    const po = purchaseOrders[idx];
+    for (const l of po.lines) {
+      if (l.receivedQty > 0) stock[l.materialId] = (stock[l.materialId] || 0) - l.receivedQty;
+    }
+    purchaseOrders.splice(idx, 1);
+  }
+
+  function logActualOrder({ type, id, name, qty, unit, supplierName, unitPrice, month, year, note }) {
+    const q = Number(qty) || 0;
+    const up = Number(unitPrice) || 0;
+    const entry = {
+      logId: nextLogId++,
+      date: new Date().toISOString(),
+      type, id, name,
+      qty: q, unit: unit || '',
+      supplierName: supplierName || null,
+      unitPrice: up,
+      totalPrice: round2(q * up),
+      month: month || null, year: year || null,
+      poNumber: null,
+      linkedPoId: null,
+      note: note || null,
+    };
+    actualOrderLogs.push(entry);
+    return entry;
+  }
+
+  function listActualOrderLogs() {
+    return [...actualOrderLogs].sort((a, b) => b.date.localeCompare(a.date));
+  }
+
+  function updateActualOrderLog(logId, patch) {
+    const entry = actualOrderLogs.find((l) => l.logId === Number(logId));
+    if (!entry) throw new HttpError(404, 'ไม่พบประวัติการสั่งซื้อ id=' + logId);
+    Object.assign(entry, patch);
+    return entry;
+  }
+
+  function deleteActualOrderLog(logId) {
+    const idx = actualOrderLogs.findIndex((l) => l.logId === Number(logId));
+    if (idx === -1) throw new HttpError(404, 'ไม่พบประวัติการสั่งซื้อ id=' + logId);
+    actualOrderLogs.splice(idx, 1);
+  }
+
+  function resolveSupplierId(supplierName) {
+    if (!supplierName) return null;
+    const found = Object.entries(suppliers).find(([, s]) => s.name === supplierName);
+    if (found) return found[0];
+    let n = Object.keys(suppliers).length + 1;
+    let newId = 'SUP-' + String(n).padStart(3, '0');
+    while (suppliers[newId]) { n += 1; newId = 'SUP-' + String(n).padStart(3, '0'); }
+    suppliers[newId] = { name: supplierName, leadTimeDays: 5 };
+    return newId;
+  }
+
+  function linkActualOrderToPo(logId, poNumber) {
+    const entry = actualOrderLogs.find((l) => l.logId === Number(logId));
+    if (!entry) throw new HttpError(404, 'ไม่พบประวัติการสั่งซื้อ id=' + logId);
+    const trimmed = (poNumber || '').trim();
+    entry.poNumber = trimmed || null;
+    const isPurchasable = entry.type === 'RAW_MATERIAL' || entry.type === 'PACKAGING';
+    if (!trimmed || !isPurchasable) return entry;
+    let po = entry.linkedPoId ? purchaseOrders.find((p) => p.poId === entry.linkedPoId) : null;
+    if (po) {
+      po.poNumber = trimmed;
+    } else {
+      const supplierId = resolveSupplierId(entry.supplierName);
+      const poDate = entry.date.slice(0, 10);
+      const leadTime = (supplierId && suppliers[supplierId] && suppliers[supplierId].leadTimeDays) || 5;
+      const expected = new Date(poDate);
+      expected.setDate(expected.getDate() + leadTime);
+      const poId = nextPoId++;
+      po = {
+        poId, poNumber: trimmed, supplierId, poDate,
+        expectedDeliveryDate: expected.toISOString().slice(0, 10),
+        status: 'APPROVED',
+        lines: [{ materialId: entry.id, orderedQty: entry.qty, unitPrice: entry.unitPrice, receivedQty: 0 }],
+        sourceLogId: entry.logId,
+      };
+      purchaseOrders.push(po);
+      entry.linkedPoId = poId;
+    }
+    return entry;
+  }
+
+  function getMrpMonthSummary(year, month, asOfDate) {
+    const repo = toEngineRepo(asOfDate);
+    const forecastLines = listForecast(year, month);
+    const forecastByProduct = forecastLines.map((f) => {
+      const unitCost = calculateBomCost(f.productId, asOfDate, repo);
+      return { productId: f.productId, name: (products[f.productId] || {}).name || f.productId, qty: f.quantity, value: round2(f.quantity * unitCost) };
+    }).sort((a, b) => b.value - a.value);
+    const forecastTotalQty = forecastByProduct.reduce((s, f) => s + f.qty, 0);
+    const forecastTotalValue = round2(forecastByProduct.reduce((s, f) => s + f.value, 0));
+
+    const mrp = calculateMrpForPeriodSafe(year, month, asOfDate);
+    const allMrpItems = [...mrp.base, ...mrp.incremental];
+    const usageByMaterial = allMrpItems.map((r) => ({
+      id: r.id, type: r.type,
+      name: r.type === 'SEMI_FINISHED' ? ((products[r.id] || {}).name || r.id) : ((materials[r.id] || {}).name || r.id),
+      qty: r.grossRequirement, unit: r.unit,
+      value: round2(r.grossRequirement * materialUnitCost(r.id)),
+    })).sort((a, b) => b.value - a.value);
+    const usageTotalValue = round2(usageByMaterial.reduce((s, u) => s + u.value, 0));
+
+    const posThisMonth = trackedPOs(new Date()).filter((po) => sameMonth(po.poDate, year, month));
+    const actualPoTotalValue = round2(posThisMonth.reduce((s, po) => s + po.lines.reduce((ls, l) => ls + poLineValue(l), 0), 0));
+
+    const logsThisMonth = actualOrderLogs.filter((l) => Number(l.year) === Number(year) && Number(l.month) === Number(month));
+    const logMap = new Map();
+    for (const l of logsThisMonth) {
+      const key = l.type + l.id;
+      const cur = logMap.get(key) || { id: l.id, type: l.type, name: l.name, qty: 0, unit: l.unit, value: 0 };
+      cur.qty += l.qty; cur.value += l.totalPrice || 0;
+      logMap.set(key, cur);
+    }
+    const actualLogByMaterial = Array.from(logMap.values()).map((x) => ({ ...x, value: round2(x.value) })).sort((a, b) => b.value - a.value);
+    const actualLogTotalValue = round2(actualLogByMaterial.reduce((s, x) => s + x.value, 0));
+
+    return {
+      period: { year: Number(year), month: Number(month) },
+      forecast: { totalQty: forecastTotalQty, totalValue: forecastTotalValue, byProduct: forecastByProduct },
+      usage: { totalValue: usageTotalValue, byMaterial: usageByMaterial },
+      actualPo: { totalValue: actualPoTotalValue, count: posThisMonth.length },
+      actualLog: { totalValue: actualLogTotalValue, count: logsThisMonth.length, byMaterial: actualLogByMaterial },
+    };
+  }
+
   function trackedPOs(today) { return listPurchaseOrdersTracking(today); }
   function isOpenPO(po) { return po.status !== 'RECEIVED' && po.status !== 'CANCELLED'; }
   function poLineValue(l) { return l.orderedQty * l.unitPrice; }
@@ -1302,7 +1485,7 @@ function createStore() {
     const forecastLines = listForecast(year, month);
     const repo = toEngineRepo(asOfDate);
     const forecastValue = forecastLines.reduce((s, f) => s + f.quantity * calculateBomCost(f.productId, asOfDate, repo), 0);
-    const requirementValue = allMrpItems.reduce((s, r) => s + r.grossRequirement * ((materials[r.id] || {}).price || 0), 0);
+    const requirementValue = allMrpItems.reduce((s, r) => s + r.grossRequirement * materialUnitCost(r.id), 0);
     const pos = trackedPOs(today);
     const openPOs = pos.filter(isOpenPO);
     const actualPurchaseValue = pos.filter((po) => sameMonth(po.poDate, year, month)).reduce((s, po) => s + po.lines.reduce((ls, l) => ls + poLineValue(l), 0), 0);
@@ -1355,6 +1538,29 @@ function createStore() {
     return Array.from(map.entries()).map(([materialId, value]) => ({ materialId, material: (materials[materialId] || {}).name, value: round2(value) })).sort((a, b) => b.value - a.value).slice(0, 10);
   }
 
+  let stockUpdatedAt = null;
+
+  function importStock(rows) {
+    let updated = 0;
+    const notFound = [];
+    for (const r of rows) {
+      const rawId = String(r.materialId ?? '').trim();
+      if (!rawId) continue;
+      const id = rawId.replace(/^\*/, '');
+      const qty = Number(r.totalStock);
+      if (!materials[id]) { notFound.push(rawId); continue; }
+      if (Number.isNaN(qty)) continue;
+      stock[id] = qty;
+      updated++;
+    }
+    stockUpdatedAt = new Date().toISOString();
+    return { updated, notFoundCount: notFound.length, notFound: notFound.slice(0, 20), total: rows.length };
+  }
+
+  function getStockInfo() {
+    return { stock: { ...stock }, stockUpdatedAt };
+  }
+
   function snapshot() {
     return {
       products: JSON.parse(JSON.stringify(products)),
@@ -1365,7 +1571,8 @@ function createStore() {
       forecasts: Array.from(forecasts.entries()).map(([key, value]) => ({ key, value })),
       purchaseOrders: JSON.parse(JSON.stringify(purchaseOrders)),
       priceHistory: JSON.parse(JSON.stringify(priceHistory)),
-      nextPoId, nextBomDetailId,
+      actualOrderLogs: JSON.parse(JSON.stringify(actualOrderLogs)),
+      nextPoId, nextBomDetailId, nextLogId, stockUpdatedAt,
     };
   }
 
@@ -1379,22 +1586,28 @@ function createStore() {
     if (Array.isArray(data.forecasts)) { forecasts.clear(); for (const entry of data.forecasts) forecasts.set(entry.key, entry.value); }
     if (Array.isArray(data.purchaseOrders)) { purchaseOrders.length = 0; purchaseOrders.push(...data.purchaseOrders); }
     if (Array.isArray(data.priceHistory)) { priceHistory.length = 0; priceHistory.push(...data.priceHistory); }
+    if (Array.isArray(data.actualOrderLogs)) { actualOrderLogs.length = 0; actualOrderLogs.push(...data.actualOrderLogs); }
     if (typeof data.nextPoId === 'number') nextPoId = data.nextPoId;
     if (typeof data.nextBomDetailId === 'number') nextBomDetailId = data.nextBomDetailId;
+    if (typeof data.nextLogId === 'number') nextLogId = data.nextLogId;
+    if (typeof data.stockUpdatedAt === 'string') stockUpdatedAt = data.stockUpdatedAt;
   }
 
   return {
-    products, materials, suppliers,
+    products, materials, suppliers, stock,
     createProduct, updateProduct, deleteProduct, createMaterial, updateMaterial, deleteMaterial,
     upsertForecast, addForecastAdjustment, listForecast, calculateMrpForPeriod,
     getBomTree, whereUsed, addBomDetail, removeBomDetail, updateBomDetail, updateBomHeader,
-    createPurchaseOrder, getPurchaseOrder, listPurchaseOrdersTracking, receiveGoods,
+    createPurchaseOrder, getPurchaseOrder, listPurchaseOrdersTracking, receiveGoods, updatePurchaseOrder, deletePurchaseOrder,
+    logActualOrder, listActualOrderLogs, updateActualOrderLog, deleteActualOrderLog, linkActualOrderToPo,
+    getMrpMonthSummary,
     getDashboardPurchasing, getDashboardExecutive,
+    importStock, getStockInfo,
     snapshot, hydrate,
   };
 }
 
-const MUTATORS = ['createProduct', 'updateProduct', 'deleteProduct', 'createMaterial', 'updateMaterial', 'deleteMaterial', 'addBomDetail', 'removeBomDetail', 'updateBomDetail', 'updateBomHeader', 'upsertForecast', 'addForecastAdjustment', 'createPurchaseOrder', 'receiveGoods'];
+const MUTATORS = ['createProduct', 'updateProduct', 'deleteProduct', 'createMaterial', 'updateMaterial', 'deleteMaterial', 'addBomDetail', 'removeBomDetail', 'updateBomDetail', 'updateBomHeader', 'upsertForecast', 'addForecastAdjustment', 'createPurchaseOrder', 'receiveGoods', 'updatePurchaseOrder', 'deletePurchaseOrder', 'logActualOrder', 'updateActualOrderLog', 'deleteActualOrderLog', 'linkActualOrderToPo', 'importStock'];
 
 /* ============================================================================
    PERSISTENCE — Firestore (client-side, ดู FIREBASE_CONFIG ด้านบนสุดของไฟล์)
@@ -1462,6 +1675,9 @@ const ICONS = {
   layoutDashboard: <><rect x="3" y="3" width="7" height="9" rx="1" /><rect x="14" y="3" width="7" height="5" rx="1" /><rect x="14" y="12" width="7" height="9" rx="1" /><rect x="3" y="16" width="7" height="5" rx="1" /></>,
   clipboardList: <><rect x="6" y="3" width="12" height="18" rx="1.5" /><rect x="9" y="1.5" width="6" height="3" rx="1" /><line x1="9" y1="9" x2="15" y2="9" /><line x1="9" y1="13" x2="15" y2="13" /><line x1="9" y1="17" x2="13" y2="17" /></>,
   calculator: <><rect x="4" y="2" width="16" height="20" rx="2" /><line x1="8" y1="6" x2="16" y2="6" /><line x1="8" y1="10" x2="8.01" y2="10" /><line x1="12" y1="10" x2="12.01" y2="10" /><line x1="16" y1="10" x2="16.01" y2="10" /><line x1="8" y1="14" x2="8.01" y2="14" /><line x1="12" y1="14" x2="12.01" y2="14" /><line x1="16" y1="14" x2="16.01" y2="14" /><line x1="8" y1="18" x2="8.01" y2="18" /><line x1="12" y1="18" x2="16" y2="18" /></>,
+  download: <><path d="M12 3v12" /><polyline points="7 11 12 16 17 11" /><path d="M4 19h16" /></>,
+  upload: <><path d="M12 21V9" /><polyline points="7 13 12 8 17 13" /><path d="M4 19h16" /></>,
+  printer: <><polyline points="6 9 6 3 18 3 18 9" /><rect x="4" y="9" width="16" height="8" rx="1" /><rect x="7" y="14" width="10" height="7" /></>,
 };
 
 function Icon({ name, size = 16, className = '' }) {
@@ -1903,7 +2119,7 @@ function ForecastTab({ store, refresh }) {
    TAB: MRP
    ============================================================================ */
 
-function MrpTab({ store }) {
+function MrpTab({ store, refresh }) {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
@@ -1912,11 +2128,28 @@ function MrpTab({ store }) {
   const [error, setError] = useState(null);
   const [expanded, setExpanded] = useState(null);
   const [actualPurchase, setActualPurchase] = useState({});
+  const [savedRows, setSavedRows] = useState({});
+  const [showSummaryDetail, setShowSummaryDetail] = useState(false);
 
   const products = store.products;
   const materials = store.materials;
 
   function nameOf(type, id) { return type === 'SEMI_FINISHED' ? (products[id]?.name || id) : (materials[id]?.name || id); }
+
+  function saveActualOrder(rowKey, payload) {
+    store.logActualOrder({ ...payload, month, year });
+    setSavedRows((prev) => ({ ...prev, [rowKey]: Date.now() }));
+    refresh();
+  }
+
+  const orderedSoFar = {};
+  for (const l of store.listActualOrderLogs()) {
+    if (Number(l.year) !== Number(year) || Number(l.month) !== Number(month)) continue;
+    const key = l.type + l.id;
+    const cur = orderedSoFar[key] || { qty: 0, unit: l.unit, count: 0 };
+    cur.qty += l.qty; cur.count += 1;
+    orderedSoFar[key] = cur;
+  }
 
   function runMRP() {
     setError(null); setMrpResult(null);
@@ -1942,12 +2175,98 @@ function MrpTab({ store }) {
     return { count: toOrder.length, value, risky: risky.length };
   }, [mrpResult, actualPurchase]);
 
+  const summary = mrpResult ? store.getMrpMonthSummary(year, month, `${year}-${String(month).padStart(2, '0')}-15`) : null;
+
+  function rowsForExport(rows) {
+    return rows.map((r) => {
+      const isMaterial = r.type === 'RAW_MATERIAL' || r.type === 'PACKAGING';
+      const mat = materials[r.id];
+      const purchaseUnit = mat?.purchaseUnit || mat?.unit || r.unit;
+      return {
+        'รหัส': r.id,
+        'รายการ': nameOf(r.type, r.id),
+        'ประเภท': r.type,
+        'Gross Requirement': r.grossRequirement,
+        'หน่วย': r.unit,
+        'Stock': r.currentStock,
+        'Open PO/Production': r.openQty,
+        'Safety Stock': r.safetyStock,
+        'Net Requirement': r.netRequirement,
+        'ต้องซื้อ': isMaterial ? (r.purchaseQtyNeeded ?? '') : '',
+        'หน่วยซื้อ': isMaterial ? purchaseUnit : '',
+        'มูลค่า (บาท)': r.requirementValue,
+        'สถานะ': r.status,
+      };
+    });
+  }
+
+  function exportExcel() {
+    if (!mrpResult) return;
+    if (!window.XLSX) { window.alert('ไม่สามารถโหลดไลบรารี Excel ได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต'); return; }
+    const wb = XLSX.utils.book_new();
+
+    const summaryRows = [
+      { 'รายการ': 'งวด', 'ค่า': `${THAI_MONTHS[month - 1]} ${year}` },
+      { 'รายการ': 'รายการที่ต้องสั่ง/ผลิต', 'ค่า': kpis?.count ?? 0 },
+      { 'รายการ': 'มูลค่าที่ต้องสั่งเพิ่ม (บาท)', 'ค่า': kpis?.value ?? 0 },
+      { 'รายการ': 'สั่งจริงน้อยกว่า Net Requirement (รายการ)', 'ค่า': kpis?.risky ?? 0 },
+    ];
+    if (summary) {
+      summaryRows.push(
+        { 'รายการ': 'Forecast (มูลค่า)', 'ค่า': summary.forecast.totalValue },
+        { 'รายการ': 'ต้องใช้ตาม MRP (มูลค่า)', 'ค่า': summary.usage.totalValue },
+        { 'รายการ': 'สั่งซื้อจริง — PO ในระบบ (มูลค่า)', 'ค่า': summary.actualPo.totalValue },
+        { 'รายการ': 'สั่งซื้อจริง — บันทึกจาก MRP (มูลค่า)', 'ค่า': summary.actualLog.totalValue }
+      );
+    }
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows), 'สรุป');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rowsForExport(mrpResult.base)), 'MRP หลัก');
+    if (mrpResult.incremental.length > 0) {
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rowsForExport(mrpResult.incremental)), 'MRP ส่วนเพิ่ม');
+    }
+    const logs = (store.listActualOrderLogs ? store.listActualOrderLogs() : []).filter(
+      (l) => Number(l.year) === Number(year) && Number(l.month) === Number(month)
+    );
+    if (logs.length > 0) {
+      const logRows = logs.map((l) => ({
+        'วันที่บันทึก': new Date(l.date).toLocaleString('th-TH'),
+        'รหัส': l.id,
+        'รายการ': l.name,
+        'จำนวน': l.qty,
+        'หน่วย': l.unit,
+        'Supplier': l.supplierName || '',
+        'มูลค่า (บาท)': l.totalPrice || 0,
+        'เลข PO': l.poNumber || '',
+      }));
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(logRows), 'ประวัติการสั่งจริง');
+    }
+    XLSX.writeFile(wb, `MRP_${year}-${String(month).padStart(2, '0')}.xlsx`);
+  }
+
+  function printPdf() {
+    window.print();
+  }
+
   return (
     <div>
       <PageHeader title="MRP / รายการที่ต้องสั่งซื้อ" year={year} month={month} onYear={setYear} onMonth={setMonth} />
-      <div className="mt-6 flex items-center justify-between">
+      <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-slate-500">{calculatedAt ? `คำนวณล่าสุด ${calculatedAt.toLocaleTimeString('th-TH')}` : 'กด "คำนวณ MRP" เพื่อ Explode BOM จาก Forecast ของเดือนนี้'}</p>
-        <button onClick={runMRP} className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-3.5 py-2 text-sm font-medium text-white transition hover:bg-amber-700"><Icon name="calculator" size={16} /> คำนวณ MRP</button>
+        <div className="no-print flex items-center gap-2">
+          <button
+            onClick={exportExcel}
+            disabled={!mrpResult}
+            title={!mrpResult ? 'กรุณาคำนวณ MRP ก่อน' : 'Export เป็นไฟล์ Excel'}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-300 disabled:hover:bg-white"
+          ><Icon name="download" size={16} /> Export Excel</button>
+          <button
+            onClick={printPdf}
+            disabled={!mrpResult}
+            title={!mrpResult ? 'กรุณาคำนวณ MRP ก่อน' : 'พิมพ์ / บันทึกเป็น PDF'}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-300 disabled:hover:bg-white"
+          ><Icon name="printer" size={16} /> พิมพ์ PDF</button>
+          <button onClick={runMRP} className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-3.5 py-2 text-sm font-medium text-white transition hover:bg-amber-700"><Icon name="calculator" size={16} /> คำนวณ MRP</button>
+        </div>
       </div>
       {error && <div className="mt-4"><ErrorBox message={error.message} onRetry={runMRP} /></div>}
       {kpis && (
@@ -1957,17 +2276,78 @@ function MrpTab({ store }) {
           <KpiCard label="สั่งจริงน้อยกว่า Net Requirement" value={kpis.risky} suffix="รายการ" tone={kpis.risky > 0 ? 'critical' : 'ok'} />
         </div>
       )}
+      {summary && <MrpMonthSummary summary={summary} showDetail={showSummaryDetail} setShowDetail={setShowSummaryDetail} />}
       {mrpResult && (
         <>
-          <MrpTable title="MRP หลัก (จาก Forecast ประจำเดือน)" rows={mrpResult.base} nameOf={nameOf} materials={materials} expanded={expanded} setExpanded={setExpanded} actualPurchase={actualPurchase} setActualPurchase={setActualPurchase} />
-          {mrpResult.incremental.length > 0 && <MrpTable title="MRP ส่วนเพิ่มระหว่างเดือน (Adjustment — แยกจากยอดหลัก ไม่ปนกัน)" rows={mrpResult.incremental} nameOf={nameOf} materials={materials} expanded={expanded} setExpanded={setExpanded} actualPurchase={actualPurchase} setActualPurchase={setActualPurchase} keyPrefix="inc-" />}
+          <MrpTable title="MRP หลัก (จาก Forecast ประจำเดือน)" rows={mrpResult.base} nameOf={nameOf} materials={materials} expanded={expanded} setExpanded={setExpanded} actualPurchase={actualPurchase} setActualPurchase={setActualPurchase} onSave={saveActualOrder} savedRows={savedRows} orderedSoFar={orderedSoFar} />
+          {mrpResult.incremental.length > 0 && <MrpTable title="MRP ส่วนเพิ่มระหว่างเดือน (Adjustment — แยกจากยอดหลัก ไม่ปนกัน)" rows={mrpResult.incremental} nameOf={nameOf} materials={materials} expanded={expanded} setExpanded={setExpanded} actualPurchase={actualPurchase} setActualPurchase={setActualPurchase} onSave={saveActualOrder} savedRows={savedRows} orderedSoFar={orderedSoFar} keyPrefix="inc-" />}
         </>
+      )}
+      <ActualOrderHistory store={store} refresh={refresh} />
+    </div>
+  );
+}
+
+function MrpMonthSummary({ summary, showDetail, setShowDetail }) {
+  const { forecast, usage, actualPo, actualLog } = summary;
+  const actualTotal = round2(actualPo.totalValue + actualLog.totalValue);
+  return (
+    <div className="mt-5">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+        <KpiCard label="Forecast (มูลค่า)" value={fmtBaht(forecast.totalValue)} />
+        <KpiCard label="ต้องใช้ตาม MRP (มูลค่า)" value={fmtBaht(usage.totalValue)} />
+        <KpiCard label="สั่งซื้อจริง — PO ในระบบ" value={fmtBaht(actualPo.totalValue)} suffix={`${actualPo.count} PO`} />
+        <KpiCard label="สั่งซื้อจริง — บันทึกจาก MRP" value={fmtBaht(actualLog.totalValue)} suffix={`${actualLog.count} รายการ`} />
+      </div>
+      <div className="mt-2 flex items-center justify-between">
+        <p className="text-xs text-slate-400">รวมสั่งซื้อจริงทั้งหมดเดือนนี้ (PO + บันทึกจาก MRP) ≈ <span className="font-semibold text-slate-600">{fmtBaht(actualTotal)}</span></p>
+        <button onClick={() => setShowDetail((v) => !v)} className="text-xs font-medium text-amber-700 hover:underline">{showDetail ? 'ซ่อนรายละเอียด' : 'ดูรายละเอียด Forecast / สั่งจริง'}</button>
+      </div>
+      {showDetail && (
+        <div className="mt-3 grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Forecast ตามสินค้า</h4>
+            <div className="mt-2 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+              <table className="w-full text-sm">
+                <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-2">สินค้า</th><th className="px-4 py-2 text-right">จำนวน</th><th className="px-4 py-2 text-right">มูลค่า</th></tr></thead>
+                <tbody>
+                  {forecast.byProduct.length === 0 && <tr><td colSpan={3} className="px-4 py-4 text-center text-xs text-slate-400">ยังไม่มี Forecast เดือนนี้</td></tr>}
+                  {forecast.byProduct.map((f) => (
+                    <tr key={f.productId} className="border-b border-slate-50 last:border-0">
+                      <td className="px-4 py-2 text-slate-700">{f.name}</td>
+                      <td className="px-4 py-2 text-right tabular">{fmt(f.qty)}</td>
+                      <td className="px-4 py-2 text-right tabular font-medium text-slate-800">{fmtBaht(f.value)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">สั่งซื้อจริง (บันทึกจาก MRP) ตามวัตถุดิบ</h4>
+            <div className="mt-2 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+              <table className="w-full text-sm">
+                <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-2">วัตถุดิบ</th><th className="px-4 py-2 text-right">จำนวน</th><th className="px-4 py-2 text-right">มูลค่า</th></tr></thead>
+                <tbody>
+                  {actualLog.byMaterial.length === 0 && <tr><td colSpan={3} className="px-4 py-4 text-center text-xs text-slate-400">ยังไม่มีการบันทึกสั่งจริงเดือนนี้</td></tr>}
+                  {actualLog.byMaterial.map((m) => (
+                    <tr key={m.type + m.id} className="border-b border-slate-50 last:border-0">
+                      <td className="px-4 py-2 text-slate-700">{m.name}</td>
+                      <td className="px-4 py-2 text-right tabular">{fmt(m.qty)} {m.unit}</td>
+                      <td className="px-4 py-2 text-right tabular font-medium text-slate-800">{fmtBaht(m.value)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
 }
 
-function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actualPurchase, setActualPurchase, keyPrefix = '' }) {
+function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actualPurchase, setActualPurchase, onSave, savedRows = {}, orderedSoFar = {}, keyPrefix = '' }) {
   return (
     <div className="mt-6">
       <h3 className="text-sm font-semibold text-slate-700">{title}</h3>
@@ -1986,6 +2366,7 @@ function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actua
               const actualInBaseUnit = actual !== undefined && actual !== '' ? Number(actual) * conversionRate : null;
               const short = actualInBaseUnit !== null && actualInBaseUnit < r.netRequirement;
               const actualPlaceholder = isMaterial ? (r.purchaseQtyNeeded ?? 0) : r.netRequirement;
+              const ordered = orderedSoFar[r.type + r.id];
               return (
                 <Fragment key={rowKey}>
                   <tr className="cursor-pointer border-b border-slate-50 last:border-0 hover:bg-slate-50/60" onClick={() => setExpanded(isOpen ? null : rowKey)}>
@@ -1997,9 +2378,36 @@ function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actua
                     <td className="px-4 py-3 text-right tabular font-semibold text-slate-900">{fmt(r.netRequirement)}</td>
                     <td className="px-4 py-3 text-right tabular font-semibold text-amber-700">{isMaterial && r.purchaseQtyNeeded !== null && r.purchaseQtyNeeded !== undefined ? `${fmt(r.purchaseQtyNeeded)} ${purchaseUnit}` : '—'}</td>
                     <td className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
-                      <div className="flex items-center justify-end gap-1.5">
-                        <input type="number" value={actual ?? ''} onChange={(e) => setActualPurchase((prev) => ({ ...prev, [rowKey]: e.target.value }))} placeholder={actualPlaceholder > 0 ? String(actualPlaceholder) : '0'} className={`w-24 rounded-lg border px-2 py-1 text-right text-sm tabular outline-none ${short ? 'border-red-300 bg-red-50 text-red-700' : 'border-slate-200 focus:border-amber-500 focus:ring-1 focus:ring-amber-500'}`} />
-                        <span className="text-xs text-slate-400">{isMaterial ? purchaseUnit : r.unit}</span>
+                      <div className="flex flex-col items-end gap-1">
+                        {ordered && (
+                          <div className={`text-[11px] font-semibold ${ordered.qty >= (actualPlaceholder || 0) ? 'text-emerald-600' : 'text-orange-500'}`}>
+                            ✓ สั่งไปแล้ว {fmt(ordered.qty)} {ordered.unit}{ordered.count > 1 ? ` (${ordered.count} ครั้ง)` : ''}
+                          </div>
+                        )}
+                        <div className="flex items-center justify-end gap-1.5">
+                          <input type="number" value={actual ?? ''} onChange={(e) => setActualPurchase((prev) => ({ ...prev, [rowKey]: e.target.value }))} placeholder={actualPlaceholder > 0 ? String(actualPlaceholder) : '0'} className={`w-24 rounded-lg border px-2 py-1 text-right text-sm tabular outline-none ${short ? 'border-red-300 bg-red-50 text-red-700' : 'border-slate-200 focus:border-amber-500 focus:ring-1 focus:ring-amber-500'}`} />
+                          <span className="text-xs text-slate-400">{isMaterial ? purchaseUnit : r.unit}</span>
+                        </div>
+                        {isMaterial && Number(actual) > 0 && (
+                          <div className="max-w-[12rem] text-right text-[11px] leading-tight text-slate-500">
+                            <div className="truncate" title={mat?.supplierName || ''}>{mat?.supplierName || 'ไม่มี Supplier ระบุ'}</div>
+                            <div className="font-semibold text-slate-700">รวม {fmtBaht(Number(actual) * (mat?.price || 0))}</div>
+                          </div>
+                        )}
+                        {onSave && Number(actual) > 0 && (
+                          <div className="flex flex-col items-end gap-0.5">
+                            <button
+                              onClick={() => onSave(rowKey, {
+                                type: r.type, id: r.id, name: nameOf(r.type, r.id),
+                                qty: Number(actual), unit: isMaterial ? purchaseUnit : r.unit,
+                                supplierName: isMaterial ? (mat?.supplierName || null) : null,
+                                unitPrice: isMaterial ? (mat?.price || 0) : 0,
+                              })}
+                              className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700 transition hover:bg-amber-100"
+                            >บันทึกสั่งจริง</button>
+                            {savedRows[rowKey] && <span className="text-[10px] text-emerald-600">บันทึกล่าสุด {new Date(savedRows[rowKey]).toLocaleTimeString('th-TH')}</span>}
+                          </div>
+                        )}
                       </div>
                     </td>
                     <td className="px-4 py-3"><StatusBadge status={r.status} /></td>
@@ -2016,6 +2424,141 @@ function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actua
                     </td></tr>
                   )}
                 </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function ActualOrderHistory({ store, refresh }) {
+  const [poDrafts, setPoDrafts] = useState({});
+  const [sortBy, setSortBy] = useState('date');
+  const [sortDir, setSortDir] = useState('desc');
+  const logs = store.listActualOrderLogs ? store.listActualOrderLogs() : [];
+  const poMap = {};
+  for (const po of store.listPurchaseOrdersTracking()) poMap[po.poId] = po;
+
+  function toggleSort(key) {
+    if (sortBy === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortBy(key);
+      setSortDir(key === 'date' ? 'desc' : 'asc');
+    }
+  }
+
+  const sortedLogs = useMemo(() => {
+    const arr = [...logs];
+    const dir = sortDir === 'asc' ? 1 : -1;
+    arr.sort((a, b) => {
+      let cmp = 0;
+      if (sortBy === 'supplier') {
+        cmp = (a.supplierName || '').localeCompare(b.supplierName || '', 'th', { numeric: true, sensitivity: 'base' });
+      } else if (sortBy === 'code') {
+        cmp = String(a.id || '').localeCompare(String(b.id || ''), 'th', { numeric: true, sensitivity: 'base' });
+      } else {
+        cmp = String(a.date).localeCompare(String(b.date));
+      }
+      if (cmp === 0) cmp = String(a.date).localeCompare(String(b.date));
+      return cmp * dir;
+    });
+    return arr;
+  }, [logs, sortBy, sortDir]);
+
+  function savePoNumber(logId) {
+    const value = (poDrafts[logId] ?? '').trim();
+    store.linkActualOrderToPo(logId, value);
+    refresh();
+  }
+
+  function removeLog(logId) {
+    if (!window.confirm('ลบประวัติการสั่งจริงรายการนี้?')) return;
+    store.deleteActualOrderLog(logId);
+    refresh();
+  }
+
+  if (logs.length === 0) return null;
+
+  const totalValue = logs.reduce((s, l) => s + (l.totalPrice || 0), 0);
+
+  function SortHeader({ label, sortKey, align = 'left' }) {
+    const active = sortBy === sortKey;
+    return (
+      <th className={`px-4 py-3 ${align === 'right' ? 'text-right' : 'text-left'}`}>
+        <button
+          onClick={() => toggleSort(sortKey)}
+          className={`inline-flex items-center gap-1 uppercase tracking-wide hover:text-slate-700 ${active ? 'text-slate-700' : ''}`}
+        >
+          {label}
+          <span className="text-[10px] leading-none">{active ? (sortDir === 'asc' ? '▲' : '▼') : '⇅'}</span>
+        </button>
+      </th>
+    );
+  }
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-slate-700">ประวัติการสั่งจริง</h3>
+        <span className="text-xs text-slate-500">{logs.length} รายการ • รวม {fmtBaht(totalValue)}</span>
+      </div>
+      <div className="mt-2 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500">
+              <SortHeader label="วันที่บันทึก" sortKey="date" />
+              <SortHeader label="รหัส" sortKey="code" />
+              <th className="px-4 py-3">รายการ</th>
+              <th className="px-4 py-3 text-right">จำนวน</th>
+              <SortHeader label="Supplier" sortKey="supplier" />
+              <th className="px-4 py-3 text-right">มูลค่า</th>
+              <th className="px-4 py-3">เลข PO</th>
+              <th className="px-4 py-3">สถานะ PO Tracking</th>
+              <th className="px-4 py-3"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {sortedLogs.map((l) => {
+              const linkedPo = l.linkedPoId ? poMap[l.linkedPoId] : null;
+              const isPurchasable = l.type === 'RAW_MATERIAL' || l.type === 'PACKAGING';
+              return (
+              <tr key={l.logId} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/60">
+                <td className="px-4 py-3 whitespace-nowrap text-slate-500">{new Date(l.date).toLocaleString('th-TH')}</td>
+                <td className="px-4 py-3 whitespace-nowrap tabular text-slate-500">{l.id || '—'}</td>
+                <td className="px-4 py-3"><div className="font-medium text-slate-800">{l.name}</div><TypeTag type={l.type} /></td>
+                <td className="px-4 py-3 text-right tabular">{fmt(l.qty)} {l.unit}</td>
+                <td className="px-4 py-3 text-slate-500">{l.supplierName || '—'}</td>
+                <td className="px-4 py-3 text-right tabular font-medium text-slate-800">{fmtBaht(l.totalPrice || 0)}</td>
+                <td className="px-4 py-3">
+                  <input
+                    type="text"
+                    defaultValue={l.poNumber || ''}
+                    onChange={(e) => setPoDrafts((prev) => ({ ...prev, [l.logId]: e.target.value }))}
+                    onBlur={() => savePoNumber(l.logId)}
+                    placeholder="ใส่เลข PO"
+                    disabled={!isPurchasable}
+                    title={!isPurchasable ? 'รายการนี้ไม่ใช่วัตถุดิบที่ซื้อได้ จึงไม่เชื่อมกับ PO Tracking' : ''}
+                    className="w-32 rounded-lg border border-slate-200 px-2 py-1 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 disabled:bg-slate-50 disabled:text-slate-400"
+                  />
+                </td>
+                <td className="px-4 py-3">
+                  {linkedPo ? (
+                    <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${STATUS_COLOR[linkedPo.status]}`}>
+                      {linkedPo.isOverdue && linkedPo.status !== 'RECEIVED' ? 'Overdue' : STATUS_LABEL[linkedPo.status]}
+                    </span>
+                  ) : l.poNumber ? (
+                    <span className="text-xs text-slate-400">ไม่เชื่อม PO</span>
+                  ) : (
+                    <span className="text-xs text-slate-300">ยังไม่ใส่เลข PO</span>
+                  )}
+                </td>
+                <td className="px-4 py-3 text-right">
+                  <button onClick={() => removeLog(l.logId)} className="text-xs text-slate-400 hover:text-red-600">ลบ</button>
+                </td>
+              </tr>
               );
             })}
           </tbody>
@@ -2543,6 +3086,41 @@ function MaterialsTab({ store, refresh }) {
   const [editForm, setEditForm] = useState(null);
   const [editError, setEditError] = useState(null);
   const [rowError, setRowError] = useState(null);
+  const [stockImportBusy, setStockImportBusy] = useState(false);
+  const [stockImportResult, setStockImportResult] = useState(null);
+  const fileInputRef = useRef(null);
+
+  function handleStockFile(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setStockImportBusy(true);
+    setStockImportResult(null);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = new Uint8Array(ev.target.result);
+        const wb = XLSX.read(data, { type: 'array' });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+        const parsed = rows.map((row) => {
+          const materialId = row['ProductID'] ?? row['ProductKey'] ?? row['MaterialID'] ?? row['รหัส'] ?? '';
+          let totalStockRaw = row['TotalStock'] ?? row['Total Stock'] ?? row['Total stock'] ?? row['สต็อกคงเหลือ'] ?? '';
+          if (typeof totalStockRaw === 'string') totalStockRaw = totalStockRaw.replace(/,/g, '').trim();
+          return { materialId: String(materialId).trim(), totalStock: totalStockRaw };
+        }).filter((r) => r.materialId);
+        const result = store.importStock(parsed);
+        setStockImportResult(result);
+        refresh();
+      } catch (err) {
+        setStockImportResult({ error: err.message || 'ไม่สามารถอ่านไฟล์ได้' });
+      } finally {
+        setStockImportBusy(false);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      }
+    };
+    reader.onerror = () => { setStockImportBusy(false); setStockImportResult({ error: 'ไม่สามารถอ่านไฟล์ได้' }); };
+    reader.readAsArrayBuffer(file);
+  }
 
   function submitAdd() {
     if (!form.name.trim() || !form.unit.trim()) return;
@@ -2602,8 +3180,21 @@ function MaterialsTab({ store, refresh }) {
         <div className="relative w-72"><Icon name="search" size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ค้นหารายการ / รหัส..." className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-8 pr-3 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
         </div>
-        {!adding && <button onClick={() => { setAdding(true); setFormError(null); }} className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-2 text-xs font-medium text-white hover:bg-slate-700"><Icon name="plus" size={14} /> เพิ่มรายการใหม่</button>}
+        <div className="flex items-center gap-2">
+          <input ref={fileInputRef} type="file" accept=".csv,.xlsx,.xls" onChange={handleStockFile} className="hidden" id="stock-upload-input" />
+          <button onClick={() => fileInputRef.current && fileInputRef.current.click()} disabled={stockImportBusy} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+            <Icon name="upload" size={14} /> {stockImportBusy ? 'กำลังนำเข้า...' : 'อัพโหลดสต็อกคงเหลือ (Excel/CSV)'}
+          </button>
+          {!adding && <button onClick={() => { setAdding(true); setFormError(null); }} className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-2 text-xs font-medium text-white hover:bg-slate-700"><Icon name="plus" size={14} /> เพิ่มรายการใหม่</button>}
+        </div>
       </div>
+      {stockImportResult && (
+        <div className={`mt-3 rounded-lg px-3 py-2 text-xs ${stockImportResult.error ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>
+          {stockImportResult.error
+            ? `เกิดข้อผิดพลาด: ${stockImportResult.error}`
+            : `อัพเดตสต็อกสำเร็จ ${stockImportResult.updated} รายการ (จากทั้งหมด ${stockImportResult.total} แถวในไฟล์)${stockImportResult.notFoundCount > 0 ? ` — ไม่พบรหัสในระบบ ${stockImportResult.notFoundCount} รายการ (เช่น ${stockImportResult.notFound.slice(0, 5).join(', ')})` : ''}`}
+        </div>
+      )}
       {adding && (
         <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
@@ -2641,7 +3232,7 @@ function MaterialsTab({ store, refresh }) {
       )}
       <div className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
-          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">รหัส</th><th className="px-4 py-3">รายการ</th><th className="px-4 py-3">ประเภท</th><th className="px-4 py-3">หน่วย BOM</th><th className="px-4 py-3">หน่วยซื้อ / อัตราแปลง</th><th className="px-4 py-3 text-right">ราคา/หน่วย</th><th className="px-4 py-3">สถานะ</th><th className="px-4 py-3"></th></tr></thead>
+          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">รหัส</th><th className="px-4 py-3">รายการ</th><th className="px-4 py-3">ประเภท</th><th className="px-4 py-3">หน่วย BOM</th><th className="px-4 py-3">หน่วยซื้อ / อัตราแปลง</th><th className="px-4 py-3 text-right">ราคา/หน่วย</th><th className="px-4 py-3 text-right">สต็อกคงเหลือ</th><th className="px-4 py-3">สถานะ</th><th className="px-4 py-3"></th></tr></thead>
           <tbody>
             {filtered.map(([id, m]) => {
               const isEditing = editingId === id;
@@ -2656,12 +3247,13 @@ function MaterialsTab({ store, refresh }) {
                         <td className="px-4 py-3 text-slate-500">{m.unit}</td>
                         <td className="px-4 py-3 text-slate-500 tabular">{fmt(m.conversionRate ?? 1)} {m.unit} / {m.purchaseUnit || m.unit}</td>
                         <td className="px-4 py-3 text-right tabular text-slate-700">{fmt(m.price)}</td>
+                        <td className="px-4 py-3 text-right tabular text-slate-700">{fmt(store.stock[id] || 0)} <span className="text-slate-400">{m.purchaseUnit || m.unit}</span></td>
                         <td className="px-4 py-3">{m.active === false ? <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500">ปิดใช้งาน</span> : <span className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">ใช้งาน</span>}</td>
                         <td className="px-4 py-3"><div className="flex items-center justify-end gap-2"><button onClick={() => startEdit(id, m)} title="แก้ไข" className="text-slate-400 hover:text-slate-600"><Icon name="pencil" size={14} /></button><button onClick={() => handleDelete(id)} title="ลบ" className="text-slate-300 hover:text-red-500"><Icon name="trash" size={14} /></button></div></td>
                       </>
                     )}
                     {isEditing && (
-                      <td colSpan={7} className="px-4 py-3">
+                      <td colSpan={8} className="px-4 py-3">
                         <div className="rounded-lg border border-amber-200 bg-amber-50/40 p-3">
                           <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
                             <div className="col-span-2"><label className="text-xs font-medium text-slate-500">รายการ</label><input value={editForm.name} onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
@@ -2693,11 +3285,11 @@ function MaterialsTab({ store, refresh }) {
                       </td>
                     )}
                   </tr>
-                  {rowError?.id === id && <tr className="border-b border-slate-50"><td colSpan={8} className="px-4 pb-2 pt-0"><p className="text-[11px] text-red-600">{rowError.message}</p></td></tr>}
+                  {rowError?.id === id && <tr className="border-b border-slate-50"><td colSpan={9} className="px-4 pb-2 pt-0"><p className="text-[11px] text-red-600">{rowError.message}</p></td></tr>}
                 </Fragment>
               );
             })}
-            {filtered.length === 0 && <tr><td colSpan={8} className="px-4 py-6 text-center text-sm text-slate-400">ไม่พบรายการ</td></tr>}
+            {filtered.length === 0 && <tr><td colSpan={9} className="px-4 py-6 text-center text-sm text-slate-400">ไม่พบรายการ</td></tr>}
           </tbody>
         </table>
       </div>
@@ -2711,13 +3303,35 @@ function MaterialsTab({ store, refresh }) {
 
 function PoTab({ store, refresh }) {
   const [creating, setCreating] = useState(false);
+  const [editingPoId, setEditingPoId] = useState(null);
   const [expandedPoId, setExpandedPoId] = useState(null);
+  const [deleteError, setDeleteError] = useState(null);
 
   const suppliers = store.suppliers;
   const materials = store.materials;
   const pos = store.listPurchaseOrdersTracking();
 
   if (creating) return <CreatePoForm store={store} suppliers={suppliers} materials={materials} onDone={() => { setCreating(false); refresh(); }} onCancel={() => setCreating(false)} />;
+
+  if (editingPoId !== null) {
+    const editingPo = pos.find((p) => p.poId === editingPoId);
+    if (editingPo) {
+      return <CreatePoForm store={store} suppliers={suppliers} materials={materials} editPo={editingPo} onDone={() => { setEditingPoId(null); refresh(); }} onCancel={() => setEditingPoId(null)} />;
+    }
+  }
+
+  function handleDelete(po) {
+    const ok = window.confirm(`ยืนยันการลบ ${po.poNumber}? การลบจะไม่สามารถย้อนกลับได้`);
+    if (!ok) return;
+    setDeleteError(null);
+    try {
+      store.deletePurchaseOrder(po.poId);
+      if (expandedPoId === po.poId) setExpandedPoId(null);
+      refresh();
+    } catch (e) {
+      setDeleteError(e.message);
+    }
+  }
 
   const totalValue = pos.reduce((s, po) => s + po.lines.reduce((ls, l) => ls + l.orderedQty * l.unitPrice, 0), 0);
   const outstandingValue = pos.reduce((s, po) => s + po.lines.reduce((ls, l) => ls + l.outstanding * l.unitPrice, 0), 0);
@@ -2734,11 +3348,12 @@ function PoTab({ store, refresh }) {
         <KpiCard label="มูลค่าคงค้าง (Outstanding)" value={fmtBaht(outstandingValue)} />
         <KpiCard label="PO เกินกำหนด (Overdue)" value={overdueCount} suffix="ใบ" tone={overdueCount > 0 ? 'critical' : 'ok'} />
       </div>
+      {deleteError && <div className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{deleteError}</div>}
       <div className="mt-6 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
-          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">PO</th><th className="px-4 py-3">Supplier</th><th className="px-4 py-3 text-right">Ordered</th><th className="px-4 py-3 text-right">Received</th><th className="px-4 py-3 text-right">Outstanding</th><th className="px-4 py-3 text-right">มูลค่า</th><th className="px-4 py-3">กำหนดส่ง</th><th className="px-4 py-3">สถานะ</th></tr></thead>
+          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">PO</th><th className="px-4 py-3">Supplier</th><th className="px-4 py-3 text-right">Ordered</th><th className="px-4 py-3 text-right">Received</th><th className="px-4 py-3 text-right">Outstanding</th><th className="px-4 py-3 text-right">มูลค่า</th><th className="px-4 py-3">กำหนดส่ง</th><th className="px-4 py-3">สถานะ</th><th className="px-4 py-3 text-right">จัดการ</th></tr></thead>
           <tbody>
-            {pos.length === 0 && <tr><td colSpan={8} className="px-4 py-8 text-center text-sm text-slate-400">ยังไม่มี PO</td></tr>}
+            {pos.length === 0 && <tr><td colSpan={9} className="px-4 py-8 text-center text-sm text-slate-400">ยังไม่มี PO</td></tr>}
             {pos.map((po) => {
               const isOpen = expandedPoId === po.poId;
               const totalOrdered = po.lines.reduce((s, l) => s + l.orderedQty, 0);
@@ -2757,9 +3372,28 @@ function PoTab({ store, refresh }) {
                     <td className="px-4 py-3 text-right tabular">{fmtBaht(totalPoValue)}</td>
                     <td className="px-4 py-3"><div className="text-slate-600">{po.expectedDeliveryDate}</div>{po.isOverdue && <div className="mt-0.5 flex items-center gap-1 text-xs font-medium text-red-600"><Icon name="alertTriangle" size={11} /> ล่าช้า {po.delayDays} วัน</div>}</td>
                     <td className="px-4 py-3"><span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${STATUS_COLOR[po.status]}`}>{po.status === 'RECEIVED' && <Icon name="checkCircle" size={12} />}{po.isOverdue && po.status !== 'RECEIVED' ? 'Overdue' : STATUS_LABEL[po.status]}</span></td>
+                    <td className="px-4 py-3 text-right">
+                      <div className="flex items-center justify-end gap-1" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          onClick={() => setEditingPoId(po.poId)}
+                          disabled={po.status === 'RECEIVED' || po.status === 'CANCELLED'}
+                          title={po.status === 'RECEIVED' || po.status === 'CANCELLED' ? 'ไม่สามารถแก้ไข PO ที่รับครบ/ยกเลิกแล้ว' : 'แก้ไข PO'}
+                          className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-amber-700 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
+                        >
+                          <Icon name="pencil" size={14} />
+                        </button>
+                        <button
+                          onClick={() => handleDelete(po)}
+                          title="ลบ PO"
+                          className="rounded-lg p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600"
+                        >
+                          <Icon name="trash" size={14} />
+                        </button>
+                      </div>
+                    </td>
                   </tr>
                   {isOpen && (
-                    <tr className="bg-slate-50/40"><td colSpan={8} className="px-4 py-4">
+                    <tr className="bg-slate-50/40"><td colSpan={9} className="px-4 py-4">
                       <div className="rounded-lg border border-slate-200 bg-white p-4">
                         <div className="mb-3 h-1.5 w-full overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${progress >= 100 ? 'bg-emerald-500' : 'bg-amber-500'}`} style={{ width: `${Math.min(100, progress)}%` }} /></div>
                         <table className="w-full text-xs">
@@ -2779,26 +3413,39 @@ function PoTab({ store, refresh }) {
   );
 }
 
-function CreatePoForm({ store, suppliers, materials, onDone, onCancel }) {
+function CreatePoForm({ store, suppliers, materials, onDone, onCancel, editPo = null }) {
+  const isEdit = !!editPo;
   const firstSupplier = Object.keys(suppliers)[0];
   const firstMaterial = Object.keys(materials)[0];
-  const [supplierId, setSupplierId] = useState(firstSupplier || '');
-  const [expectedDeliveryDate, setExpectedDeliveryDate] = useState('');
-  const [lines, setLines] = useState([{ materialId: firstMaterial || '', orderedQty: '', unitPrice: firstMaterial ? materials[firstMaterial].price : '' }]);
+  const [supplierId, setSupplierId] = useState(isEdit ? editPo.supplierId : (firstSupplier || ''));
+  const [expectedDeliveryDate, setExpectedDeliveryDate] = useState(isEdit ? editPo.expectedDeliveryDate : '');
+  const [lines, setLines] = useState(
+    isEdit
+      ? editPo.lines.map((l) => ({ materialId: l.materialId, orderedQty: l.orderedQty, unitPrice: l.unitPrice, receivedQty: l.receivedQty }))
+      : [{ materialId: firstMaterial || '', orderedQty: '', unitPrice: firstMaterial ? materials[firstMaterial].price : '' }]
+  );
   const [submitError, setSubmitError] = useState(null);
 
   function updateLine(i, patch) { setLines((prev) => prev.map((l, idx) => (idx === i ? { ...l, ...patch } : l))); }
   function addLine() { const fm = Object.keys(materials)[0]; setLines((prev) => [...prev, { materialId: fm, orderedQty: '', unitPrice: materials[fm].price }]); }
-  function removeLine(i) { setLines((prev) => prev.filter((_, idx) => idx !== i)); }
+  function removeLine(i) {
+    const line = lines[i];
+    if (line.receivedQty > 0) return;
+    setLines((prev) => prev.filter((_, idx) => idx !== i));
+  }
 
   const total = lines.reduce((s, l) => s + (Number(l.orderedQty) || 0) * (Number(l.unitPrice) || 0), 0);
-  const canSubmit = expectedDeliveryDate && lines.every((l) => Number(l.orderedQty) > 0);
+  const canSubmit = expectedDeliveryDate && lines.every((l) => Number(l.orderedQty) > 0 && Number(l.orderedQty) >= (l.receivedQty || 0));
 
   function submit() {
     if (!canSubmit) return;
     setSubmitError(null);
     try {
-      store.createPurchaseOrder({ supplierId, expectedDeliveryDate, lines: lines.map((l) => ({ materialId: l.materialId, orderedQty: Number(l.orderedQty), unitPrice: Number(l.unitPrice) })) });
+      if (isEdit) {
+        store.updatePurchaseOrder(editPo.poId, { supplierId, expectedDeliveryDate, lines: lines.map((l) => ({ materialId: l.materialId, orderedQty: Number(l.orderedQty), unitPrice: Number(l.unitPrice) })) });
+      } else {
+        store.createPurchaseOrder({ supplierId, expectedDeliveryDate, lines: lines.map((l) => ({ materialId: l.materialId, orderedQty: Number(l.orderedQty), unitPrice: Number(l.unitPrice) })) });
+      }
       onDone();
     } catch (e) { setSubmitError(e.message); }
   }
@@ -2806,7 +3453,7 @@ function CreatePoForm({ store, suppliers, materials, onDone, onCancel }) {
   return (
     <div>
       <p className="font-display text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing</p>
-      <h1 className="font-display mt-1 text-2xl font-semibold text-slate-900">สร้าง Purchase Order</h1>
+      <h1 className="font-display mt-1 text-2xl font-semibold text-slate-900">{isEdit ? `แก้ไข Purchase Order · ${editPo.poNumber}` : 'สร้าง Purchase Order'}</h1>
       <div className="mt-6 rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div><label className="text-xs font-medium text-slate-500">Supplier</label>
@@ -2819,23 +3466,31 @@ function CreatePoForm({ store, suppliers, materials, onDone, onCancel }) {
         <div className="mt-5">
           <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">รายการวัตถุดิบ</p>
           <div className="space-y-2">
-            {lines.map((l, i) => (
-              <div key={i} className="flex items-center gap-2 rounded-lg bg-slate-50 p-2.5">
-                <div className="w-64">
-                  <SearchableSelect
-                    options={Object.entries(materials).map(([id, m]) => [id, `${id} — ${m.name}`])}
-                    value={l.materialId}
-                    onChange={(id) => updateLine(i, { materialId: id, unitPrice: materials[id].price })}
-                    placeholder="พิมพ์ค้นหารหัส/ชื่อ..."
-                  />
+            {lines.map((l, i) => {
+              const locked = isEdit && (l.receivedQty || 0) > 0;
+              return (
+                <div key={i} className="flex items-center gap-2 rounded-lg bg-slate-50 p-2.5">
+                  <div className="w-64">
+                    {locked ? (
+                      <div className="rounded-lg border border-slate-200 bg-slate-100 px-3 py-1.5 text-sm text-slate-600">{materials[l.materialId]?.name || l.materialId}</div>
+                    ) : (
+                      <SearchableSelect
+                        options={Object.entries(materials).map(([id, m]) => [id, `${id} — ${m.name}`])}
+                        value={l.materialId}
+                        onChange={(id) => updateLine(i, { materialId: id, unitPrice: materials[id].price })}
+                        placeholder="พิมพ์ค้นหารหัส/ชื่อ..."
+                      />
+                    )}
+                  </div>
+                  <input type="number" placeholder="จำนวน" min={l.receivedQty || 0} value={l.orderedQty} onChange={(e) => updateLine(i, { orderedQty: e.target.value })} className="w-28 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
+                  <span className="text-slate-300">×</span>
+                  <input type="number" value={l.unitPrice} onChange={(e) => updateLine(i, { unitPrice: e.target.value })} className="w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
+                  <span className="ml-auto text-sm tabular font-medium text-slate-700">{fmtBaht((Number(l.orderedQty) || 0) * (Number(l.unitPrice) || 0))}</span>
+                  {locked && <span className="text-[10px] text-slate-400">รับแล้ว {fmt(l.receivedQty)}</span>}
+                  {lines.length > 1 && !locked && <button onClick={() => removeLine(i)} className="text-slate-300 hover:text-red-500"><Icon name="trash" size={14} /></button>}
                 </div>
-                <input type="number" placeholder="จำนวน" value={l.orderedQty} onChange={(e) => updateLine(i, { orderedQty: e.target.value })} className="w-28 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
-                <span className="text-slate-300">×</span>
-                <input type="number" value={l.unitPrice} onChange={(e) => updateLine(i, { unitPrice: e.target.value })} className="w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
-                <span className="ml-auto text-sm tabular font-medium text-slate-700">{fmtBaht((Number(l.orderedQty) || 0) * (Number(l.unitPrice) || 0))}</span>
-                {lines.length > 1 && <button onClick={() => removeLine(i)} className="text-slate-300 hover:text-red-500"><Icon name="trash" size={14} /></button>}
-              </div>
-            ))}
+              );
+            })}
           </div>
           <button onClick={addLine} className="mt-2 inline-flex items-center gap-1.5 text-sm font-medium text-amber-700 hover:text-amber-800"><Icon name="plus" size={14} /> เพิ่มรายการ</button>
         </div>
@@ -2844,97 +3499,10 @@ function CreatePoForm({ store, suppliers, materials, onDone, onCancel }) {
           <div className="text-sm text-slate-500">มูลค่ารวม <span className="font-display ml-1 text-lg font-semibold tabular text-slate-900">{fmtBaht(total)}</span></div>
           <div className="flex gap-2">
             <button onClick={onCancel} className="rounded-lg px-3.5 py-2 text-sm font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
-            <button onClick={submit} disabled={!canSubmit} className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"><Icon name="truck" size={16} /> สร้าง PO</button>
+            <button onClick={submit} disabled={!canSubmit} className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"><Icon name="truck" size={16} /> {isEdit ? 'บันทึกการแก้ไข' : 'สร้าง PO'}</button>
           </div>
         </div>
       </div>
-    </div>
-  );
-}
-
-/* ============================================================================
-   TAB: Receiving
-   ============================================================================ */
-
-function ReceivingTab({ store, refresh }) {
-  const suppliers = store.suppliers;
-  const materials = store.materials;
-  const pos = store.listPurchaseOrdersTracking();
-  const [selectedId, setSelectedId] = useState(null);
-  const [amounts, setAmounts] = useState({});
-  const today = new Date();
-
-  const receivable = pos.filter((p) => p.status !== 'RECEIVED' && p.status !== 'CANCELLED' && p.status !== 'DRAFT');
-
-  useEffect(() => {
-    if (selectedId === null && receivable.length > 0) setSelectedId(receivable[0].poId);
-  }, []);
-
-  function submit() {
-    const po = pos.find((p) => p.poId === selectedId);
-    if (!po) return;
-    const nonZero = Object.fromEntries(Object.entries(amounts).filter(([, v]) => Number(v) > 0));
-    if (Object.keys(nonZero).length === 0) return;
-    const lines = Object.entries(nonZero).map(([materialId, receivedQty]) => ({ materialId, receivedQty: Number(receivedQty) }));
-    store.receiveGoods(po.poId, lines);
-    setAmounts({});
-    refresh();
-  }
-
-  const po = pos.find((p) => p.poId === selectedId);
-
-  return (
-    <div>
-      <p className="font-display text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing</p>
-      <h1 className="font-display mt-1 text-2xl font-semibold text-slate-900">รับสินค้า (Receiving)</h1>
-      {receivable.length === 0 ? (
-        <div className="mt-6 rounded-xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-400">ไม่มี PO ที่รอรับสินค้าในขณะนี้</div>
-      ) : (
-        <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
-          <div className="lg:col-span-1">
-            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">เลือก PO</p>
-            <ul className="space-y-1.5">
-              {receivable.map((p) => (
-                <li key={p.poId}>
-                  <button onClick={() => { setSelectedId(p.poId); setAmounts({}); }} className={`w-full rounded-lg border px-3 py-2.5 text-left text-sm transition ${selectedId === p.poId ? 'border-amber-400 bg-amber-50' : 'border-slate-200 bg-white hover:border-slate-300'}`}>
-                    <div className="flex items-center justify-between"><span className="font-medium text-slate-800">{p.poNumber}</span><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ring-1 ring-inset ${STATUS_COLOR[p.status]}`}>{STATUS_LABEL[p.status]}</span></div>
-                    <div className="mt-0.5 text-xs text-slate-400">{suppliers[p.supplierId]?.name}</div>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-          <div className="lg:col-span-2">
-            {po && (
-              <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                <div className="flex items-center justify-between">
-                  <div><p className="font-display text-lg font-semibold text-slate-900">{po.poNumber}</p><p className="text-xs text-slate-400">{suppliers[po.supplierId]?.name} · กำหนดส่ง {po.expectedDeliveryDate}</p></div>
-                  <div className="flex items-center gap-1.5 text-xs text-slate-400"><Icon name="clock" size={13} /> วันนี้ {today.toISOString().slice(0, 10)}</div>
-                </div>
-                <div className="mt-4 space-y-3">
-                  {po.lines.map((l) => {
-                    const progress = (l.receivedQty / l.orderedQty) * 100;
-                    return (
-                      <div key={l.materialId} className="rounded-lg border border-slate-100 p-3">
-                        <div className="flex items-center justify-between text-sm"><span className="font-medium text-slate-800">{materials[l.materialId]?.name}</span><span className="tabular text-slate-500">{fmt(l.receivedQty)} / {fmt(l.orderedQty)}</span></div>
-                        <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${progress >= 100 ? 'bg-emerald-500' : 'bg-amber-500'}`} style={{ width: `${Math.min(100, progress)}%` }} /></div>
-                        {l.outstanding > 0 && (
-                          <div className="mt-2 flex items-center gap-2">
-                            <label className="text-xs text-slate-500">รับเพิ่มครั้งนี้:</label>
-                            <input type="number" max={l.outstanding} value={amounts[l.materialId] ?? ''} onChange={(e) => setAmounts((prev) => ({ ...prev, [l.materialId]: e.target.value }))} placeholder={`สูงสุด ${fmt(l.outstanding)}`} className="w-32 rounded-lg border border-slate-200 px-2 py-1 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
-                            <span className="text-xs text-slate-400">(ค้างรับ {fmt(l.outstanding)})</span>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-                <button onClick={submit} className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700"><Icon name="packageCheck" size={16} /> บันทึกรับสินค้า</button>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -2950,12 +3518,11 @@ const TABS = [
   ['bom', 'BOM', 'layers', BomTab],
   ['materials', 'Materials', 'boxes', MaterialsTab],
   ['po', 'PO Tracking', 'truck', PoTab],
-  ['receiving', 'Receiving', 'packageCheck', ReceivingTab],
 ];
 
 function Sidebar({ activeTab, setActiveTab }) {
   return (
-    <aside className="w-56 shrink-0 border-r border-slate-200 bg-white px-3 py-5">
+    <aside className="no-print w-56 shrink-0 border-r border-slate-200 bg-white px-3 py-5">
       <div className="px-2">
         <p className="font-display text-[10px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery</p>
         <p className="font-display text-lg font-semibold text-slate-900">Purchasing · MRP</p>
