@@ -1482,6 +1482,53 @@ function PageHeader({ title, year, month, onYear, onMonth }) {
   );
 }
 
+/**
+ * SearchableSelect — dropdown ที่พิมพ์ค้นหาได้ (สำหรับรายการยาวๆ เช่น วัตถุดิบ 700+ รายการ)
+ * options: array ของ [id, label] — label ควรมีทั้งรหัส+ชื่อ เพื่อค้นหาได้ทั้งสองแบบ
+ */
+function SearchableSelect({ options, value, onChange, placeholder = 'พิมพ์ค้นหา...' }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    function handleClickOutside(e) {
+      if (containerRef.current && !containerRef.current.contains(e.target)) { setOpen(false); setQuery(''); }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const selected = options.find(([id]) => id === value);
+  const q = query.trim().toLowerCase();
+  const filtered = q === '' ? options : options.filter(([id, label]) => label.toLowerCase().includes(q));
+  const shown = filtered.slice(0, 200);
+
+  return (
+    <div className="relative" ref={containerRef}>
+      <input
+        value={open ? query : (selected ? selected[1] : '')}
+        onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
+        onFocus={() => { setQuery(''); setOpen(true); }}
+        placeholder={placeholder}
+        className="w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
+      />
+      {open && (
+        <div className="absolute z-20 mt-1 max-h-64 w-full min-w-[280px] overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg">
+          {shown.length === 0 && <div className="px-3 py-2 text-xs text-slate-400">ไม่พบรายการ</div>}
+          {shown.map(([id, label]) => (
+            <button key={id} type="button" onMouseDown={(e) => e.preventDefault()} onClick={() => { onChange(id); setOpen(false); setQuery(''); }}
+              className={`block w-full truncate px-3 py-1.5 text-left text-sm hover:bg-amber-50 ${id === value ? 'bg-amber-50 font-medium text-amber-800' : 'text-slate-700'}`}>
+              {label}
+            </button>
+          ))}
+          {filtered.length > shown.length && <div className="border-t border-slate-100 px-3 py-1.5 text-[11px] text-slate-400">พบ {filtered.length} รายการ — พิมพ์เพิ่มเพื่อจำกัดผลลัพธ์</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const STATUS_LABEL = { DRAFT: 'Draft', PENDING_APPROVAL: 'รออนุมัติ', APPROVED: 'อนุมัติแล้ว', SENT: 'ส่ง Supplier แล้ว', PARTIALLY_RECEIVED: 'รับบางส่วน', RECEIVED: 'รับครบแล้ว', CANCELLED: 'ยกเลิก' };
 const STATUS_COLOR = { DRAFT: 'bg-slate-100 text-slate-600 ring-slate-500/10', PENDING_APPROVAL: 'bg-sky-50 text-sky-700 ring-sky-600/20', APPROVED: 'bg-sky-50 text-sky-700 ring-sky-600/20', SENT: 'bg-sky-50 text-sky-700 ring-sky-600/20', PARTIALLY_RECEIVED: 'bg-amber-50 text-amber-700 ring-amber-600/20', RECEIVED: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20', CANCELLED: 'bg-red-50 text-red-700 ring-red-600/20' };
 
@@ -2081,10 +2128,15 @@ function BomMaster({ productId, products, materials, store, refresh }) {
                   <option value="RAW_MATERIAL">วัตถุดิบ</option><option value="PACKAGING">บรรจุภัณฑ์</option><option value="SEMI_FINISHED">กึ่งสำเร็จรูป</option>
                 </select>
               </div>
-              <div><label className="text-xs text-slate-500">รายการ</label>
-                <select value={newId} onChange={(e) => setNewId(e.target.value)} className="mt-1 block w-48 rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
-                  <option value="">เลือก...</option>{componentOptions.map(([id, o]) => <option key={id} value={id}>{o.name}</option>)}
-                </select>
+              <div className="w-72"><label className="text-xs text-slate-500">รายการ</label>
+                <div className="mt-1">
+                  <SearchableSelect
+                    options={componentOptions.map(([id, o]) => [id, `${id} — ${o.name}`])}
+                    value={newId}
+                    onChange={setNewId}
+                    placeholder="พิมพ์ค้นหารหัส/ชื่อ..."
+                  />
+                </div>
               </div>
               <div><label className="text-xs text-slate-500">จำนวน</label><input type="number" value={newQty} onChange={(e) => setNewQty(e.target.value)} className="mt-1 block w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
               <div><label className="text-xs text-slate-500">Loss %</label><input type="number" value={newLoss} onChange={(e) => setNewLoss(e.target.value)} className="mt-1 block w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
@@ -2378,9 +2430,14 @@ function CreatePoForm({ store, suppliers, materials, onDone, onCancel }) {
           <div className="space-y-2">
             {lines.map((l, i) => (
               <div key={i} className="flex items-center gap-2 rounded-lg bg-slate-50 p-2.5">
-                <select value={l.materialId} onChange={(e) => updateLine(i, { materialId: e.target.value, unitPrice: materials[e.target.value].price })} className="w-40 rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
-                  {Object.entries(materials).map(([id, m]) => <option key={id} value={id}>{m.name}</option>)}
-                </select>
+                <div className="w-64">
+                  <SearchableSelect
+                    options={Object.entries(materials).map(([id, m]) => [id, `${id} — ${m.name}`])}
+                    value={l.materialId}
+                    onChange={(id) => updateLine(i, { materialId: id, unitPrice: materials[id].price })}
+                    placeholder="พิมพ์ค้นหารหัส/ชื่อ..."
+                  />
+                </div>
                 <input type="number" placeholder="จำนวน" value={l.orderedQty} onChange={(e) => updateLine(i, { orderedQty: e.target.value })} className="w-28 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
                 <span className="text-slate-300">×</span>
                 <input type="number" value={l.unitPrice} onChange={(e) => updateLine(i, { unitPrice: e.target.value })} className="w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
