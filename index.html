@@ -2064,29 +2064,59 @@ function BomTab({ store, refresh }) {
   );
 }
 
+function blankBomRow() {
+  return { key: 'r' + Math.random().toString(36).slice(2, 9), type: 'RAW_MATERIAL', id: '', qty: '', loss: '0', yield: '100' };
+}
+
 function BomMaster({ productId, products, materials, store, refresh }) {
   const [adding, setAdding] = useState(false);
-  const [newType, setNewType] = useState('RAW_MATERIAL');
-  const [newId, setNewId] = useState('');
-  const [newQty, setNewQty] = useState('');
-  const [newLoss, setNewLoss] = useState('0');
-  const [newYield, setNewYield] = useState('100');
+  const [rows, setRows] = useState([blankBomRow()]);
   const [submitError, setSubmitError] = useState(null);
 
   const tree = store.getBomTree(productId, TODAY) || { productId, productName: products[productId]?.name || productId, version: null, components: [] };
 
-  const componentOptions = useMemo(() => {
-    if (newType === 'SEMI_FINISHED') return Object.entries(products).filter(([id, p]) => p.type === 'SEMI_FINISHED' && id !== productId);
-    return Object.entries(materials).filter(([, m]) => m.type === newType);
-  }, [newType, products, materials, productId]);
+  const totalsByUnit = useMemo(() => {
+    const map = {};
+    tree.components.forEach((c) => { map[c.unit] = (map[c.unit] || 0) + Number(c.quantity || 0); });
+    return Object.entries(map);
+  }, [tree.components]);
 
-  function submit() {
-    if (!newId || !newQty) return;
-    const unit = newType === 'SEMI_FINISHED' ? 'ชิ้น' : (materials[newId]?.unit || 'kg');
+  function optionsFor(type) {
+    if (type === 'SEMI_FINISHED') return Object.entries(products).filter(([id, p]) => p.type === 'SEMI_FINISHED' && id !== productId);
+    return Object.entries(materials).filter(([, m]) => m.type === type);
+  }
+
+  function updateRow(key, patch) {
+    setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+  }
+  function addRow() {
+    setRows((rs) => [...rs, blankBomRow()]);
+  }
+  function removeRow(key) {
+    setRows((rs) => (rs.length === 1 ? rs : rs.filter((r) => r.key !== key)));
+  }
+  function startAdding() {
+    setRows([blankBomRow()]);
+    setSubmitError(null);
+    setAdding(true);
+  }
+  function cancelAdding() {
+    setAdding(false);
+    setSubmitError(null);
+    setRows([blankBomRow()]);
+  }
+
+  function submitAll() {
+    const emptyRow = rows.find((r) => !r.id || r.qty === '' || r.qty === null);
+    if (emptyRow) { setSubmitError('กรุณาเลือกรายการและระบุจำนวนให้ครบทุกแถว'); return; }
     setSubmitError(null);
     try {
-      store.addBomDetail(productId, { componentType: newType, componentId: newId, quantity: Number(newQty), unit, lossPct: Number(newLoss), yieldPct: Number(newYield) }, TODAY);
-      setNewId(''); setNewQty(''); setNewLoss('0'); setNewYield('100'); setAdding(false);
+      rows.forEach((r) => {
+        const unit = r.type === 'SEMI_FINISHED' ? 'ชิ้น' : (materials[r.id]?.unit || 'kg');
+        store.addBomDetail(productId, { componentType: r.type, componentId: r.id, quantity: Number(r.qty), unit, lossPct: Number(r.loss), yieldPct: Number(r.yield) }, TODAY);
+      });
+      setRows([blankBomRow()]);
+      setAdding(false);
       refresh();
     } catch (e) { setSubmitError(e.message); }
   }
@@ -2101,7 +2131,7 @@ function BomMaster({ productId, products, materials, store, refresh }) {
         <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">{tree.version || 'ยังไม่มี BOM'}</span>
         <span className="text-xs text-slate-400">ณ {TODAY}</span>
       </div>
-      <div className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      <div className="mt-4 overflow-hidden rounded-t-xl border border-b-0 border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
           <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">Component</th><th className="px-4 py-3 text-right">Quantity</th><th className="px-4 py-3">Unit</th><th className="px-4 py-3 text-right">Loss %</th><th className="px-4 py-3 text-right">Yield %</th><th className="px-4 py-3"></th></tr></thead>
           <tbody>
@@ -2117,36 +2147,60 @@ function BomMaster({ productId, products, materials, store, refresh }) {
               </tr>
             ))}
           </tbody>
-        </table>
-        <div className="border-t border-slate-100 p-4">
-          {!adding ? (
-            <button onClick={() => setAdding(true)} className="inline-flex items-center gap-1.5 text-sm font-medium text-amber-700 hover:text-amber-800"><Icon name="plus" size={14} /> เพิ่ม Component</button>
-          ) : (
-            <div className="flex flex-wrap items-end gap-2">
-              <div><label className="text-xs text-slate-500">ประเภท</label>
-                <select value={newType} onChange={(e) => { setNewType(e.target.value); setNewId(''); }} className="mt-1 block w-32 rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
-                  <option value="RAW_MATERIAL">วัตถุดิบ</option><option value="PACKAGING">บรรจุภัณฑ์</option><option value="SEMI_FINISHED">กึ่งสำเร็จรูป</option>
-                </select>
-              </div>
-              <div className="w-72"><label className="text-xs text-slate-500">รายการ</label>
-                <div className="mt-1">
-                  <SearchableSelect
-                    options={componentOptions.map(([id, o]) => [id, `${id} — ${o.name}`])}
-                    value={newId}
-                    onChange={setNewId}
-                    placeholder="พิมพ์ค้นหารหัส/ชื่อ..."
-                  />
-                </div>
-              </div>
-              <div><label className="text-xs text-slate-500">จำนวน</label><input type="number" value={newQty} onChange={(e) => setNewQty(e.target.value)} className="mt-1 block w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
-              <div><label className="text-xs text-slate-500">Loss %</label><input type="number" value={newLoss} onChange={(e) => setNewLoss(e.target.value)} className="mt-1 block w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
-              <div><label className="text-xs text-slate-500">Yield %</label><input type="number" value={newYield} onChange={(e) => setNewYield(e.target.value)} className="mt-1 block w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
-              <button onClick={() => { setAdding(false); setSubmitError(null); }} className="rounded-lg px-3 py-1.5 text-sm font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
-              <button onClick={submit} className="rounded-lg bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700">เพิ่ม</button>
-            </div>
+          {tree.components.length > 0 && (
+            <tfoot>
+              <tr className="border-t-2 border-slate-200 bg-slate-50/80 text-slate-700">
+                <td className="px-4 py-3 font-semibold">รวมน้ำหนักสุทธิ Batch</td>
+                <td className="px-4 py-3 text-right tabular font-semibold">
+                  {totalsByUnit.map(([u, v]) => (<div key={u}>{fmt(v)}</div>))}
+                </td>
+                <td className="px-4 py-3 font-medium text-slate-500">
+                  {totalsByUnit.map(([u]) => (<div key={u}>{u}</div>))}
+                </td>
+                <td className="px-4 py-3" colSpan={3}></td>
+              </tr>
+            </tfoot>
           )}
-          {submitError && <p className="mt-2 text-xs text-red-600">{submitError}</p>}
-        </div>
+        </table>
+      </div>
+      <div className="rounded-b-xl border border-t-0 border-slate-200 bg-white p-4 shadow-sm">
+        {!adding ? (
+          <button onClick={startAdding} className="inline-flex items-center gap-1.5 text-sm font-medium text-amber-700 hover:text-amber-800"><Icon name="plus" size={14} /> เพิ่ม Component</button>
+        ) : (
+          <div className="flex flex-col gap-3">
+            {rows.map((r, idx) => (
+              <div key={r.key} className="flex flex-wrap items-end gap-2 border-b border-slate-50 pb-3 last:border-0 last:pb-0">
+                <div><label className="text-xs text-slate-500">ประเภท</label>
+                  <select value={r.type} onChange={(e) => updateRow(r.key, { type: e.target.value, id: '' })} className="mt-1 block w-32 rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
+                    <option value="RAW_MATERIAL">วัตถุดิบ</option><option value="PACKAGING">บรรจุภัณฑ์</option><option value="SEMI_FINISHED">กึ่งสำเร็จรูป</option>
+                  </select>
+                </div>
+                <div className="w-72"><label className="text-xs text-slate-500">รายการ</label>
+                  <div className="mt-1">
+                    <SearchableSelect
+                      options={optionsFor(r.type).map(([id, o]) => [id, `${id} — ${o.name}`])}
+                      value={r.id}
+                      onChange={(id) => updateRow(r.key, { id })}
+                      placeholder="พิมพ์ค้นหารหัส/ชื่อ..."
+                    />
+                  </div>
+                </div>
+                <div><label className="text-xs text-slate-500">จำนวน</label><input type="number" value={r.qty} onChange={(e) => updateRow(r.key, { qty: e.target.value })} className="mt-1 block w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+                <div><label className="text-xs text-slate-500">Loss %</label><input type="number" value={r.loss} onChange={(e) => updateRow(r.key, { loss: e.target.value })} className="mt-1 block w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+                <div><label className="text-xs text-slate-500">Yield %</label><input type="number" value={r.yield} onChange={(e) => updateRow(r.key, { yield: e.target.value })} className="mt-1 block w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+                <button onClick={() => removeRow(r.key)} disabled={rows.length === 1} className="rounded-lg px-2 py-1.5 text-slate-300 hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-40" title="ลบแถวนี้"><Icon name="trash" size={14} /></button>
+              </div>
+            ))}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+              <button onClick={addRow} className="inline-flex items-center gap-1.5 text-sm font-medium text-amber-700 hover:text-amber-800"><Icon name="plus" size={14} /> เพิ่มแถว</button>
+              <div className="flex items-center gap-2">
+                <button onClick={cancelAdding} className="rounded-lg px-3 py-1.5 text-sm font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
+                <button onClick={submitAll} className="rounded-lg bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700">บันทึก ({rows.length})</button>
+              </div>
+            </div>
+          </div>
+        )}
+        {submitError && <p className="mt-2 text-xs text-red-600">{submitError}</p>}
       </div>
     </div>
   );
