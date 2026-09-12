@@ -1155,6 +1155,22 @@ function createStore() {
     return Array.from(forecasts.values()).filter((f) => f.year === Number(year) && f.month === Number(month));
   }
 
+  function deleteForecast(year, month, productId) {
+    const key = forecastKey(year, month, productId);
+    if (!forecasts.has(key)) throw new HttpError(404, 'ไม่พบ Forecast รายการนี้');
+    forecasts.delete(key);
+    return { deleted: true };
+  }
+
+  function removeForecastAdjustment(year, month, productId, index) {
+    const key = forecastKey(year, month, productId);
+    const existing = forecasts.get(key);
+    if (!existing) throw new HttpError(404, 'ไม่พบ Forecast รายการนี้');
+    if (!existing.adjustments[index]) throw new HttpError(404, 'ไม่พบรายการที่เพิ่มระหว่างเดือนนี้');
+    existing.adjustments.splice(index, 1);
+    return existing;
+  }
+
   function calculateMrpForPeriod(year, month, asOfDate) {
     const lines = listForecast(year, month);
     if (lines.length === 0) throw new HttpError(404, 'ไม่พบ Forecast ของช่วงเวลานี้');
@@ -1596,7 +1612,7 @@ function createStore() {
   return {
     products, materials, suppliers, stock,
     createProduct, updateProduct, deleteProduct, createMaterial, updateMaterial, deleteMaterial,
-    upsertForecast, addForecastAdjustment, listForecast, calculateMrpForPeriod,
+    upsertForecast, addForecastAdjustment, listForecast, deleteForecast, removeForecastAdjustment, calculateMrpForPeriod,
     getBomTree, whereUsed, addBomDetail, removeBomDetail, updateBomDetail, updateBomHeader,
     createPurchaseOrder, getPurchaseOrder, listPurchaseOrdersTracking, receiveGoods, updatePurchaseOrder, deletePurchaseOrder,
     logActualOrder, listActualOrderLogs, updateActualOrderLog, deleteActualOrderLog, linkActualOrderToPo,
@@ -1607,7 +1623,7 @@ function createStore() {
   };
 }
 
-const MUTATORS = ['createProduct', 'updateProduct', 'deleteProduct', 'createMaterial', 'updateMaterial', 'deleteMaterial', 'addBomDetail', 'removeBomDetail', 'updateBomDetail', 'updateBomHeader', 'upsertForecast', 'addForecastAdjustment', 'createPurchaseOrder', 'receiveGoods', 'updatePurchaseOrder', 'deletePurchaseOrder', 'logActualOrder', 'updateActualOrderLog', 'deleteActualOrderLog', 'linkActualOrderToPo', 'importStock'];
+const MUTATORS = ['createProduct', 'updateProduct', 'deleteProduct', 'createMaterial', 'updateMaterial', 'deleteMaterial', 'addBomDetail', 'removeBomDetail', 'updateBomDetail', 'updateBomHeader', 'upsertForecast', 'addForecastAdjustment', 'deleteForecast', 'removeForecastAdjustment', 'createPurchaseOrder', 'receiveGoods', 'updatePurchaseOrder', 'deletePurchaseOrder', 'logActualOrder', 'updateActualOrderLog', 'deleteActualOrderLog', 'linkActualOrderToPo', 'importStock'];
 
 /* ============================================================================
    PERSISTENCE — Firestore (client-side, ดู FIREBASE_CONFIG ด้านบนสุดของไฟล์)
@@ -2018,12 +2034,14 @@ function ForecastTab({ store, refresh }) {
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
   const [formOpen, setFormOpen] = useState(false);
+  const [editingEntryId, setEditingEntryId] = useState(null);
   const [formProduct, setFormProduct] = useState('');
   const [formQty, setFormQty] = useState('');
   const [formNote, setFormNote] = useState('');
   const [adjOpenFor, setAdjOpenFor] = useState(null);
   const [adjQty, setAdjQty] = useState('');
   const [adjChannel, setAdjChannel] = useState('');
+  const [rowError, setRowError] = useState(null);
 
   const products = store.products;
   const entries = store.listForecast(year, month);
@@ -2031,11 +2049,36 @@ function ForecastTab({ store, refresh }) {
 
   useEffect(() => { if (!formProduct && finishedProducts.length) setFormProduct(finishedProducts[0][0]); }, [products]);
 
+  function openAddForm() {
+    setEditingEntryId(null);
+    setFormQty('');
+    setFormNote('');
+    if (finishedProducts.length) setFormProduct(finishedProducts[0][0]);
+    setFormOpen((v) => !v);
+  }
+
+  function openEditForm(entry) {
+    const revisions = entry.revisions;
+    const cur = revisions[revisions.length - 1];
+    setEditingEntryId(entry.productId);
+    setFormProduct(entry.productId);
+    setFormQty(String(cur.quantity));
+    setFormNote(cur.note || '');
+    setFormOpen(true);
+  }
+
+  function closeForm() {
+    setFormOpen(false);
+    setEditingEntryId(null);
+    setFormQty('');
+    setFormNote('');
+  }
+
   function submitForecast() {
     const qty = Number(formQty);
     if (!qty || qty <= 0) return;
     store.upsertForecast({ year, month, productId: formProduct, quantity: qty, note: formNote, enteredBy: 'purchasing' });
-    setFormQty(''); setFormNote(''); setFormOpen(false);
+    closeForm();
     refresh();
   }
 
@@ -2043,8 +2086,25 @@ function ForecastTab({ store, refresh }) {
     const qty = Number(adjQty);
     if (!qty || qty <= 0) return;
     store.addForecastAdjustment({ year, month, productId, additionalQty: qty, customerChannel: adjChannel, enteredBy: 'purchasing' });
-    setAdjQty(''); setAdjChannel(''); setAdjOpenFor(null);
+    setAdjQty(''); setAdjChannel('');
     refresh();
+  }
+
+  function handleRemoveAdjustment(productId, index) {
+    setRowError(null);
+    try { store.removeForecastAdjustment(year, month, productId, index); refresh(); }
+    catch (e) { setRowError({ id: productId, message: e.message }); }
+  }
+
+  function handleDeleteForecast(productId, name) {
+    setRowError(null);
+    if (!window.confirm(`ยืนยันลบ Forecast ของ "${name}" ประจำเดือนนี้? การลบนี้ย้อนกลับไม่ได้`)) return;
+    try {
+      store.deleteForecast(year, month, productId);
+      if (editingEntryId === productId) closeForm();
+      if (adjOpenFor === productId) setAdjOpenFor(null);
+      refresh();
+    } catch (e) { setRowError({ id: productId, message: e.message }); }
   }
 
   return (
@@ -2052,15 +2112,20 @@ function ForecastTab({ store, refresh }) {
       <PageHeader title="Forecast ประจำเดือน" year={year} month={month} onYear={setYear} onMonth={setMonth} />
       <div className="mt-6 flex items-center justify-between">
         <p className="text-sm text-slate-500">ระบบเก็บ Version ทุกครั้งที่แก้ไข Forecast ไม่ทับของเดิม</p>
-        <button onClick={() => setFormOpen((v) => !v)} className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-2 text-sm font-medium text-white transition hover:bg-slate-700"><Icon name="plus" size={16} /> เพิ่ม / แก้ไข Forecast</button>
+        <button onClick={openAddForm} className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-2 text-sm font-medium text-white transition hover:bg-slate-700"><Icon name="plus" size={16} /> เพิ่ม Forecast</button>
       </div>
       {formOpen && (
         <div className="mt-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+          {editingEntryId && <p className="mb-3 text-xs font-medium text-amber-700">กำลังแก้ไข Forecast ของ {products[editingEntryId]?.name}</p>}
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <div><label className="text-xs font-medium text-slate-500">Product</label>
-              <select value={formProduct} onChange={(e) => setFormProduct(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
-                {finishedProducts.map(([id, p]) => <option key={id} value={id}>{p.name}</option>)}
-              </select>
+              {editingEntryId ? (
+                <div className="mt-1 w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-600">{products[editingEntryId]?.name}</div>
+              ) : (
+                <select value={formProduct} onChange={(e) => setFormProduct(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
+                  {finishedProducts.map(([id, p]) => <option key={id} value={id}>{p.name}</option>)}
+                </select>
+              )}
             </div>
             <div><label className="text-xs font-medium text-slate-500">Forecast Quantity</label>
               <input type="number" value={formQty} onChange={(e) => setFormQty(e.target.value)} placeholder="เช่น 10000" className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
@@ -2070,8 +2135,8 @@ function ForecastTab({ store, refresh }) {
             </div>
           </div>
           <div className="mt-4 flex justify-end gap-2">
-            <button onClick={() => setFormOpen(false)} className="rounded-lg px-3.5 py-2 text-sm font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
-            <button onClick={submitForecast} className="rounded-lg bg-amber-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-amber-700">บันทึก Forecast</button>
+            <button onClick={closeForm} className="rounded-lg px-3.5 py-2 text-sm font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
+            <button onClick={submitForecast} className="rounded-lg bg-amber-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-amber-700">{editingEntryId ? 'บันทึกการแก้ไข' : 'บันทึก Forecast'}</button>
           </div>
         </div>
       )}
@@ -2093,15 +2158,34 @@ function ForecastTab({ store, refresh }) {
                     <td className="px-5 py-4 text-right tabular text-slate-400">{prev !== null ? fmt(prev) : '—'}</td>
                     <td className="px-5 py-4 text-right tabular text-emerald-600">{adjTotal > 0 ? `+${fmt(adjTotal)}` : '—'}</td>
                     <td className="px-5 py-4"><span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500"><Icon name="history" size={11} /> v{revisions.length}</span></td>
-                    <td className="px-5 py-4 text-right"><button onClick={() => setAdjOpenFor(adjOpenFor === entry.productId ? null : entry.productId)} className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 hover:text-amber-800"><Icon name="packagePlus" size={13} /> เพิ่มระหว่างเดือน</button></td>
+                    <td className="px-5 py-4"><div className="flex items-center justify-end gap-3">
+                      <button onClick={() => setAdjOpenFor(adjOpenFor === entry.productId ? null : entry.productId)} className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 hover:text-amber-800"><Icon name="packagePlus" size={13} /> เพิ่มระหว่างเดือน</button>
+                      <button onClick={() => openEditForm(entry)} title="แก้ไข Forecast" className="text-slate-400 hover:text-slate-600"><Icon name="pencil" size={14} /></button>
+                      <button onClick={() => handleDeleteForecast(entry.productId, products[entry.productId]?.name)} title="ลบ Forecast" className="text-slate-300 hover:text-red-500"><Icon name="trash" size={14} /></button>
+                    </div></td>
                   </tr>
+                  {rowError?.id === entry.productId && <tr><td colSpan={6} className="px-5 pb-2 pt-0"><p className="text-[11px] text-red-600">{rowError.message}</p></td></tr>}
                   {adjOpenFor === entry.productId && (
                     <tr className="bg-amber-50/40"><td colSpan={6} className="px-5 py-4">
+                      {entry.adjustments.length > 0 && (
+                        <div className="mb-3 space-y-1.5">
+                          {entry.adjustments.map((a, i) => (
+                            <div key={i} className="flex items-center justify-between rounded-lg bg-white px-3 py-1.5 text-xs shadow-sm">
+                              <div className="flex items-center gap-2">
+                                <span className="font-medium tabular text-emerald-600">+{fmt(a.additionalQty)}</span>
+                                {a.customerChannel && <span className="text-slate-400">· {a.customerChannel}</span>}
+                                <span className="text-slate-300">· {new Date(a.adjustDate).toLocaleDateString('th-TH')}</span>
+                              </div>
+                              <button onClick={() => handleRemoveAdjustment(entry.productId, i)} title="ลบรายการนี้" className="text-slate-300 hover:text-red-500"><Icon name="trash" size={12} /></button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                       <div className="flex flex-wrap items-end gap-3">
                         <div><label className="text-xs font-medium text-slate-500">จำนวน Order เพิ่ม</label><input type="number" value={adjQty} onChange={(e) => setAdjQty(e.target.value)} className="mt-1 block w-32 rounded-lg border border-slate-200 px-3 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
                         <div><label className="text-xs font-medium text-slate-500">ลูกค้า / ช่องทาง</label><input value={adjChannel} onChange={(e) => setAdjChannel(e.target.value)} placeholder="เช่น Modern Trade" className="mt-1 block w-48 rounded-lg border border-slate-200 px-3 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
                         <button onClick={() => submitAdjustment(entry.productId)} className="rounded-lg bg-slate-900 px-3.5 py-1.5 text-sm font-medium text-white hover:bg-slate-700">บันทึก</button>
-                        <button onClick={() => setAdjOpenFor(null)} className="rounded-lg px-3.5 py-1.5 text-sm font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
+                        <button onClick={() => setAdjOpenFor(null)} className="rounded-lg px-3.5 py-1.5 text-sm font-medium text-slate-500 hover:bg-slate-100">ปิด</button>
                       </div>
                     </td></tr>
                   )}
@@ -2730,7 +2814,7 @@ function BomTab({ store, refresh }) {
               </nav>
               <div className="mt-4">
                 {tab === 'master' && <BomMaster key={selectedProduct} productId={selectedProduct} products={products} materials={materials} store={store} refresh={refresh} />}
-                {tab === 'tree' && <BomTreeView key={selectedProduct} productId={selectedProduct} store={store} />}
+                {tab === 'tree' && <BomTreeView key={selectedProduct} productId={selectedProduct} productType={products[selectedProduct].type} store={store} />}
                 {tab === 'whereused' && <WhereUsed productId={selectedProduct} productType={products[selectedProduct].type} products={products} store={store} jumpTo={(pid) => { setSelectedProduct(pid); setTab('master'); }} />}
               </div>
             </>
@@ -2748,6 +2832,7 @@ function blankBomRow() {
 function isProducedType(type) { return type === 'SEMI_FINISHED' || type === 'WIP'; }
 
 function BomMaster({ productId, products, materials, store, refresh }) {
+  const isFinished = products[productId]?.type === 'FINISHED';
   const [adding, setAdding] = useState(false);
   const [rows, setRows] = useState([blankBomRow()]);
   const [submitError, setSubmitError] = useState(null);
@@ -2856,6 +2941,22 @@ function BomMaster({ productId, products, materials, store, refresh }) {
     setEditingHeader(true);
   }
   function saveHeader() {
+    if (isFinished) {
+      try {
+        store.updateBomHeader(productId, {
+          version: tree.version || 'v1.0',
+          effectiveDate: tree.effectiveDate || TODAY,
+          batchYieldQty: 1,
+          batchYieldUnit: headerDraft.batchYieldUnit.trim() || 'ชิ้น',
+          lossPct: 0,
+          yieldPct: 100,
+        });
+        setEditingHeader(false);
+        setSubmitError(null);
+        refresh();
+      } catch (e) { setSubmitError(e.message); }
+      return;
+    }
     if (!headerDraft.version.trim() || !headerDraft.effectiveDate) { setSubmitError('กรุณาระบุ Version และวันที่มีผลให้ครบ'); return; }
     if (!(Number(headerDraft.batchYieldQty) > 0)) { setSubmitError('จำนวนที่ผลิตได้/Batch ต้องมากกว่า 0'); return; }
     if (!(Number(headerDraft.yieldPct) > 0)) { setSubmitError('Yield % ต้องมากกว่า 0'); return; }
@@ -2886,7 +2987,9 @@ function BomMaster({ productId, products, materials, store, refresh }) {
       sourceTree.components.forEach((c) => {
         store.addBomDetail(productId, { componentType: c.componentType, componentId: c.componentId, quantity: c.quantity, unit: c.unit }, TODAY);
       });
-      store.updateBomHeader(productId, { batchYieldQty: sourceTree.batchYieldQty ?? 1, batchYieldUnit: sourceTree.batchYieldUnit ?? 'ชิ้น', lossPct: sourceTree.lossPct ?? 0, yieldPct: sourceTree.yieldPct ?? 100 });
+      store.updateBomHeader(productId, isFinished
+        ? { batchYieldQty: 1, batchYieldUnit: sourceTree.batchYieldUnit ?? 'ชิ้น', lossPct: 0, yieldPct: 100 }
+        : { batchYieldQty: sourceTree.batchYieldQty ?? 1, batchYieldUnit: sourceTree.batchYieldUnit ?? 'ชิ้น', lossPct: sourceTree.lossPct ?? 0, yieldPct: sourceTree.yieldPct ?? 100 });
       setCopyOpen(false);
       setCopySourceId('');
       setSubmitError(null);
@@ -2899,19 +3002,38 @@ function BomMaster({ productId, products, materials, store, refresh }) {
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
         {!editingHeader ? (
           <>
-            <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">{tree.version || 'ยังไม่มี BOM'}</span>
-            <span className="text-xs text-slate-400">ณ {tree.effectiveDate || TODAY}</span>
-            {tree.version && (
-              <span className="inline-flex items-center gap-2 rounded-full bg-slate-50 px-2.5 py-1 text-xs text-slate-500">
-                <span>Loss {fmt(tree.lossPct ?? 0)}%</span><span className="text-slate-300">·</span>
-                <span>Yield {fmt(tree.yieldPct ?? 100)}%</span><span className="text-slate-300">·</span>
-                <span title="จำนวนที่ผลิตได้จาก Batch นี้">ผลิตได้/Batch {fmt(tree.batchYieldQty ?? 1)} {tree.batchYieldUnit ?? 'ชิ้น'}</span>
-              </span>
+            {isFinished ? (
+              <>
+                {tree.version ? (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-50 px-2.5 py-1 text-xs text-slate-500">หน่วย (ต่อ 1 FG): <span className="font-medium text-slate-700">{tree.batchYieldUnit || 'ชิ้น'}</span></span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">ยังไม่มี BOM</span>
+                )}
+                {tree.version && <button onClick={startEditHeader} className="inline-flex items-center gap-1 text-xs font-medium text-slate-400 hover:text-slate-600"><Icon name="pencil" size={12} /> แก้ไข</button>}
+              </>
+            ) : (
+              <>
+                <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">{tree.version || 'ยังไม่มี BOM'}</span>
+                <span className="text-xs text-slate-400">ณ {tree.effectiveDate || TODAY}</span>
+                {tree.version && (
+                  <span className="inline-flex items-center gap-2 rounded-full bg-slate-50 px-2.5 py-1 text-xs text-slate-500">
+                    <span>Loss {fmt(tree.lossPct ?? 0)}%</span><span className="text-slate-300">·</span>
+                    <span>Yield {fmt(tree.yieldPct ?? 100)}%</span><span className="text-slate-300">·</span>
+                    <span title="จำนวนที่ผลิตได้จาก Batch นี้">ผลิตได้/Batch {fmt(tree.batchYieldQty ?? 1)} {tree.batchYieldUnit ?? 'ชิ้น'}</span>
+                  </span>
+                )}
+                {tree.version && <button onClick={startEditHeader} className="inline-flex items-center gap-1 text-xs font-medium text-slate-400 hover:text-slate-600"><Icon name="pencil" size={12} /> แก้ไข</button>}
+              </>
             )}
-            {tree.version && <button onClick={startEditHeader} className="inline-flex items-center gap-1 text-xs font-medium text-slate-400 hover:text-slate-600"><Icon name="pencil" size={12} /> แก้ไข</button>}
             <div className="ml-auto">
               <button onClick={() => { setCopyOpen((v) => !v); setSubmitError(null); }} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"><Icon name="copy" size={13} /> คัดลอก BOM จากสินค้าอื่น</button>
             </div>
+          </>
+        ) : isFinished ? (
+          <>
+            <div><label className="text-xs text-slate-500">หน่วย (ต่อ 1 FG)</label><input value={headerDraft.batchYieldUnit} onChange={(e) => setHeaderDraft((h) => ({ ...h, batchYieldUnit: e.target.value }))} placeholder="ชิ้น" className="mt-1 block w-28 rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+            <button onClick={() => setEditingHeader(false)} className="rounded-lg px-3 py-1.5 text-sm font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
+            <button onClick={saveHeader} className="rounded-lg bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700">บันทึก</button>
           </>
         ) : (
           <>
@@ -3025,15 +3147,16 @@ function BomMaster({ productId, products, materials, store, refresh }) {
   );
 }
 
-function BomTreeNode({ node, depth = 0 }) {
+function BomTreeNode({ node, depth = 0, hideBatchInfo = false }) {
   if (!node) return null;
   return (
     <div style={{ marginLeft: depth * 20 }}>
       <div className="flex flex-wrap items-center gap-2 border-l-2 border-slate-100 py-1.5 pl-3">
         <span className="text-xs tabular text-slate-400">{node.productId}</span>
         <span className="text-sm font-medium text-slate-800">{node.productName}</span>
-        <span className="text-xs text-slate-400">{node.version}</span>
-        <span className="text-[11px] text-slate-400">Loss {fmt(node.lossPct ?? 0)}% · Yield {fmt(node.yieldPct ?? 100)}% · ผลิตได้/Batch {fmt(node.batchYieldQty ?? 1)} {node.batchYieldUnit ?? 'ชิ้น'}</span>
+        {!hideBatchInfo && <span className="text-xs text-slate-400">{node.version}</span>}
+        {!hideBatchInfo && <span className="text-[11px] text-slate-400">Loss {fmt(node.lossPct ?? 0)}% · Yield {fmt(node.yieldPct ?? 100)}% · ผลิตได้/Batch {fmt(node.batchYieldQty ?? 1)} {node.batchYieldUnit ?? 'ชิ้น'}</span>}
+        {hideBatchInfo && <span className="text-xs text-slate-400">หน่วย: {node.batchYieldUnit ?? 'ชิ้น'}</span>}
       </div>
       {node.components.map((c) => (
         <div key={c.bomDetailId} style={{ marginLeft: (depth + 1) * 20 }} className="border-l-2 border-slate-100 py-1 pl-3">
@@ -3045,10 +3168,10 @@ function BomTreeNode({ node, depth = 0 }) {
   );
 }
 
-function BomTreeView({ productId, store }) {
+function BomTreeView({ productId, productType, store }) {
   const tree = store.getBomTree(productId, TODAY);
   if (!tree) return <div className="rounded-xl border border-dashed border-slate-200 bg-white p-8 text-center text-sm text-slate-400">ยังไม่มี BOM สำหรับสินค้านี้</div>;
-  return <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><BomTreeNode node={tree} /></div>;
+  return <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><BomTreeNode node={tree} hideBatchInfo={productType === 'FINISHED'} /></div>;
 }
 
 function WhereUsed({ productId, productType, products, store, jumpTo }) {
