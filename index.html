@@ -90,16 +90,18 @@ function explodeBOM(productId, requiredQty, asOfDate, repo, visitedPath = []) {
   const newPath = [...visitedPath, productId];
   const bom = repo.getActiveBom(productId, asOfDate);
   if (!bom) return [];
+  const yieldFactor = (bom.yieldPct ?? 100) / 100;
+  const lossFactor = 1 + (bom.lossPct ?? 0) / 100;
+  const batchYieldQty = (bom.batchYieldQty ?? 1) > 0 ? (bom.batchYieldQty ?? 1) : 1;
+  if (yieldFactor <= 0) throw new Error('yield_pct ต้องมากกว่า 0 (product_id=' + productId + ')');
   const results = [];
   for (const detail of bom.details) {
-    const yieldFactor = (detail.yieldPct ?? 100) / 100;
-    const lossFactor = 1 + (detail.lossPct ?? 0) / 100;
-    if (yieldFactor <= 0) throw new Error('yield_pct ต้องมากกว่า 0 (bom_detail_id=' + detail.bomDetailId + ')');
-    const neededQty = (requiredQty * detail.quantity / yieldFactor) * lossFactor;
+    const perUnitQty = detail.quantity / batchYieldQty;
+    const neededQty = (requiredQty * perUnitQty / yieldFactor) * lossFactor;
     if (detail.componentType === 'RAW_MATERIAL' || detail.componentType === 'PACKAGING') {
       results.push({ type: detail.componentType, id: detail.componentId, qty: neededQty, unit: detail.unit, source: { product: productId, bomDetailId: detail.bomDetailId, path: newPath } });
-    } else if (detail.componentType === 'SEMI_FINISHED') {
-      results.push({ type: 'SEMI_FINISHED', id: detail.componentId, qty: neededQty, unit: detail.unit, source: { product: productId, bomDetailId: detail.bomDetailId, path: newPath } });
+    } else if (detail.componentType === 'SEMI_FINISHED' || detail.componentType === 'WIP') {
+      results.push({ type: detail.componentType, id: detail.componentId, qty: neededQty, unit: detail.unit, source: { product: productId, bomDetailId: detail.bomDetailId, path: newPath } });
       results.push(...explodeBOM(detail.componentId, neededQty, asOfDate, repo, newPath));
     } else {
       throw new Error('Unknown component_type: ' + detail.componentType);
@@ -129,14 +131,16 @@ function explodeAndAggregate(forecastLines, asOfDate, repo) {
 function calculateBomCost(productId, asOfDate, repo) {
   const bom = repo.getActiveBom(productId, asOfDate);
   if (!bom) return repo.getMaterialPrice ? (repo.getMaterialPrice(productId) || 0) : 0;
+  const yieldFactor = (bom.yieldPct ?? 100) / 100;
+  const lossFactor = 1 + (bom.lossPct ?? 0) / 100;
+  const batchYieldQty = (bom.batchYieldQty ?? 1) > 0 ? (bom.batchYieldQty ?? 1) : 1;
   let total = 0;
   for (const detail of bom.details) {
-    const yieldFactor = (detail.yieldPct ?? 100) / 100;
-    const lossFactor = 1 + (detail.lossPct ?? 0) / 100;
-    const unitCost = detail.componentType === 'SEMI_FINISHED'
+    const perUnitQty = detail.quantity / batchYieldQty;
+    const unitCost = (detail.componentType === 'SEMI_FINISHED' || detail.componentType === 'WIP')
       ? calculateBomCost(detail.componentId, asOfDate, repo)
       : (repo.getMaterialPrice ? (repo.getMaterialPrice(detail.componentId) || 0) : 0);
-    total += (unitCost * detail.quantity / yieldFactor) * lossFactor;
+    total += (unitCost * perUnitQty / yieldFactor) * lossFactor;
   }
   return total;
 }
@@ -148,7 +152,8 @@ function calculateMRP(forecastLines, asOfDate, repo) {
     const stock = repo.getStock(item.type, item.id) || 0;
     const safetyStock = (repo.getSafetyStock && repo.getSafetyStock(item.id)) || 0;
     const scheduledReceipt = (repo.getScheduledReceipt && repo.getScheduledReceipt(item.id)) || 0;
-    const openQty = item.type === 'SEMI_FINISHED'
+    const isProduced = item.type === 'SEMI_FINISHED' || item.type === 'WIP';
+    const openQty = isProduced
       ? (repo.getOpenProductionQty && repo.getOpenProductionQty(item.id)) || 0
       : (repo.getOpenPoQty && repo.getOpenPoQty(item.id)) || 0;
     const grossRequirement = item.totalQty;
@@ -156,9 +161,9 @@ function calculateMRP(forecastLines, asOfDate, repo) {
     let status;
     if (netRequirement < 0) {
       netRequirement = 0;
-      status = item.type === 'SEMI_FINISHED' ? 'Stock + Open Production เพียงพอ' : 'Stock + Open PO เพียงพอ';
+      status = isProduced ? 'Stock + Open Production เพียงพอ' : 'Stock + Open PO เพียงพอ';
     } else {
-      status = item.type === 'SEMI_FINISHED' ? 'ต้องผลิตเพิ่ม' : 'ต้องสั่งเพิ่ม';
+      status = isProduced ? 'ต้องผลิตเพิ่ม' : 'ต้องสั่งเพิ่ม';
     }
     const conversionRate = (repo.getConversionRate && repo.getConversionRate(item.id)) || 1;
     const purchaseQtyNeeded = conversionRate > 0 ? Math.ceil(netRequirement / conversionRate) : null;
@@ -206,32 +211,32 @@ class HttpError extends Error {
 
 function createStore() {
   const boms = {
-    P003: { version: 'v1.0', effectiveDate: '2026-01-01', details: [
-      { bomDetailId: 'd1', componentType: 'RAW_MATERIAL', componentId: 'M001', quantity: 0.025, unit: 'kg', lossPct: 0, yieldPct: 100 },
-      { bomDetailId: 'd2', componentType: 'RAW_MATERIAL', componentId: 'M002', quantity: 0.010, unit: 'kg', lossPct: 0, yieldPct: 100 },
-      { bomDetailId: 'd3', componentType: 'RAW_MATERIAL', componentId: 'M003', quantity: 0.002, unit: 'kg', lossPct: 0, yieldPct: 100 },
-      { bomDetailId: 'd4', componentType: 'RAW_MATERIAL', componentId: 'M004', quantity: 0.008, unit: 'kg', lossPct: 0, yieldPct: 100 },
-      { bomDetailId: 'd5', componentType: 'RAW_MATERIAL', componentId: 'M005', quantity: 0.015, unit: 'kg', lossPct: 0, yieldPct: 100 },
+    P003: { version: 'v1.0', effectiveDate: '2026-01-01', batchYieldQty: 1, lossPct: 0, yieldPct: 100, details: [
+      { bomDetailId: 'd1', componentType: 'RAW_MATERIAL', componentId: 'M001', quantity: 0.025, unit: 'kg' },
+      { bomDetailId: 'd2', componentType: 'RAW_MATERIAL', componentId: 'M002', quantity: 0.010, unit: 'kg' },
+      { bomDetailId: 'd3', componentType: 'RAW_MATERIAL', componentId: 'M003', quantity: 0.002, unit: 'kg' },
+      { bomDetailId: 'd4', componentType: 'RAW_MATERIAL', componentId: 'M004', quantity: 0.008, unit: 'kg' },
+      { bomDetailId: 'd5', componentType: 'RAW_MATERIAL', componentId: 'M005', quantity: 0.015, unit: 'kg' },
     ]},
-    P001: { version: 'v1.0', effectiveDate: '2026-01-01', details: [
-      { bomDetailId: 'd6', componentType: 'SEMI_FINISHED', componentId: 'P003', quantity: 1, unit: 'pcs', lossPct: 0, yieldPct: 100 },
-      { bomDetailId: 'd7', componentType: 'RAW_MATERIAL', componentId: 'M007', quantity: 0.020, unit: 'kg', lossPct: 0, yieldPct: 100 },
-      { bomDetailId: 'd8', componentType: 'PACKAGING', componentId: 'M006', quantity: 1, unit: 'pcs', lossPct: 0, yieldPct: 100 },
+    P001: { version: 'v1.0', effectiveDate: '2026-01-01', batchYieldQty: 1, lossPct: 0, yieldPct: 100, details: [
+      { bomDetailId: 'd6', componentType: 'SEMI_FINISHED', componentId: 'P003', quantity: 1, unit: 'pcs' },
+      { bomDetailId: 'd7', componentType: 'RAW_MATERIAL', componentId: 'M007', quantity: 0.020, unit: 'kg' },
+      { bomDetailId: 'd8', componentType: 'PACKAGING', componentId: 'M006', quantity: 1, unit: 'pcs' },
     ]},
-    P002: { version: 'v1.0', effectiveDate: '2026-01-01', details: [
-      { bomDetailId: 'd9', componentType: 'SEMI_FINISHED', componentId: 'P003', quantity: 1, unit: 'pcs', lossPct: 0, yieldPct: 100 },
-      { bomDetailId: 'd10', componentType: 'RAW_MATERIAL', componentId: 'M008', quantity: 0.015, unit: 'kg', lossPct: 0, yieldPct: 100 },
-      { bomDetailId: 'd11', componentType: 'PACKAGING', componentId: 'M006', quantity: 1, unit: 'pcs', lossPct: 0, yieldPct: 100 },
+    P002: { version: 'v1.0', effectiveDate: '2026-01-01', batchYieldQty: 1, lossPct: 0, yieldPct: 100, details: [
+      { bomDetailId: 'd9', componentType: 'SEMI_FINISHED', componentId: 'P003', quantity: 1, unit: 'pcs' },
+      { bomDetailId: 'd10', componentType: 'RAW_MATERIAL', componentId: 'M008', quantity: 0.015, unit: 'kg' },
+      { bomDetailId: 'd11', componentType: 'PACKAGING', componentId: 'M006', quantity: 1, unit: 'pcs' },
     ]},
-    P004: { version: 'v1.0', effectiveDate: '2026-01-01', details: [
-      { bomDetailId: 'd12', componentType: 'SEMI_FINISHED', componentId: 'P003', quantity: 1, unit: 'pcs', lossPct: 0, yieldPct: 100 },
-      { bomDetailId: 'd13', componentType: 'RAW_MATERIAL', componentId: 'M009', quantity: 0.018, unit: 'kg', lossPct: 0, yieldPct: 100 },
-      { bomDetailId: 'd14', componentType: 'PACKAGING', componentId: 'M006', quantity: 1, unit: 'pcs', lossPct: 0, yieldPct: 100 },
+    P004: { version: 'v1.0', effectiveDate: '2026-01-01', batchYieldQty: 1, lossPct: 0, yieldPct: 100, details: [
+      { bomDetailId: 'd12', componentType: 'SEMI_FINISHED', componentId: 'P003', quantity: 1, unit: 'pcs' },
+      { bomDetailId: 'd13', componentType: 'RAW_MATERIAL', componentId: 'M009', quantity: 0.018, unit: 'kg' },
+      { bomDetailId: 'd14', componentType: 'PACKAGING', componentId: 'M006', quantity: 1, unit: 'pcs' },
     ]},
-    P005: { version: 'v1.0', effectiveDate: '2026-01-01', details: [
-      { bomDetailId: 'd15', componentType: 'SEMI_FINISHED', componentId: 'P003', quantity: 1, unit: 'pcs', lossPct: 0, yieldPct: 100 },
-      { bomDetailId: 'd16', componentType: 'RAW_MATERIAL', componentId: 'M010', quantity: 0.018, unit: 'kg', lossPct: 0, yieldPct: 100 },
-      { bomDetailId: 'd17', componentType: 'PACKAGING', componentId: 'M006', quantity: 1, unit: 'pcs', lossPct: 0, yieldPct: 100 },
+    P005: { version: 'v1.0', effectiveDate: '2026-01-01', batchYieldQty: 1, lossPct: 0, yieldPct: 100, details: [
+      { bomDetailId: 'd15', componentType: 'SEMI_FINISHED', componentId: 'P003', quantity: 1, unit: 'pcs' },
+      { bomDetailId: 'd16', componentType: 'RAW_MATERIAL', componentId: 'M010', quantity: 0.018, unit: 'kg' },
+      { bomDetailId: 'd17', componentType: 'PACKAGING', componentId: 'M006', quantity: 1, unit: 'pcs' },
     ]},
   };
 
@@ -1005,14 +1010,14 @@ function createStore() {
       getSemiFinishedChildren(productId) {
         const bom = boms[productId];
         if (!bom) return [];
-        return bom.details.filter((d) => d.componentType === 'SEMI_FINISHED').map((d) => d.componentId);
+        return bom.details.filter((d) => d.componentType === 'SEMI_FINISHED' || d.componentType === 'WIP').map((d) => d.componentId);
       },
     };
   }
 
   function createProduct({ productId, name, type }) {
     if (!name) throw new HttpError(400, 'ขาดข้อมูลที่จำเป็น: name');
-    if (type !== 'FINISHED' && type !== 'SEMI_FINISHED') throw new HttpError(400, 'type ต้องเป็น FINISHED หรือ SEMI_FINISHED');
+    if (type !== 'FINISHED' && type !== 'SEMI_FINISHED' && type !== 'WIP') throw new HttpError(400, 'type ต้องเป็น FINISHED, SEMI_FINISHED หรือ WIP');
     let id = productId;
     if (!id) {
       const nums = Object.keys(products).map((k) => /^P(\d+)$/.exec(k)).filter(Boolean).map((m) => Number(m[1]));
@@ -1024,9 +1029,18 @@ function createStore() {
     return { productId: id, name, type };
   }
 
+  function updateProduct(productId, { name, type }) {
+    const p = products[productId];
+    if (!p) throw new HttpError(404, 'ไม่พบ Product: ' + productId);
+    if (type !== undefined && type !== 'FINISHED' && type !== 'SEMI_FINISHED' && type !== 'WIP') throw new HttpError(400, 'type ต้องเป็น FINISHED, SEMI_FINISHED หรือ WIP');
+    if (name !== undefined) { if (!name.trim()) throw new HttpError(400, 'ขาดข้อมูลที่จำเป็น: name'); p.name = name.trim(); }
+    if (type !== undefined) p.type = type;
+    return { productId, ...p };
+  }
+
   function deleteProduct(productId) {
     if (!products[productId]) throw new HttpError(404, 'ไม่พบ Product: ' + productId);
-    const usedIn = whereUsed('SEMI_FINISHED', productId);
+    const usedIn = [...whereUsed('SEMI_FINISHED', productId), ...whereUsed('WIP', productId)];
     if (usedIn.length > 0) {
       const names = usedIn.map((u) => u.productName).join(', ');
       throw new HttpError(400, 'ลบไม่ได้ เพราะสินค้านี้ถูกใช้เป็น Component อยู่ใน: ' + names + ' — กรุณาลบออกจาก BOM เหล่านั้นก่อน');
@@ -1036,7 +1050,7 @@ function createStore() {
     return { productId, deleted: true };
   }
 
-  function createMaterial({ materialId, name, type, unit, price, safetyStock, conversionRate }) {
+  function createMaterial({ materialId, name, type, unit, price, safetyStock, conversionRate, purchaseUnit, moq, maxStock, shelfLifeMonths, supplierName, note, active }) {
     if (!name) throw new HttpError(400, 'ขาดข้อมูลที่จำเป็น: name');
     if (type !== 'RAW_MATERIAL' && type !== 'PACKAGING') throw new HttpError(400, 'type ต้องเป็น RAW_MATERIAL หรือ PACKAGING');
     if (!unit) throw new HttpError(400, 'ขาดข้อมูลที่จำเป็น: unit');
@@ -1047,11 +1061,17 @@ function createStore() {
       id = 'M' + String(next).padStart(3, '0');
     }
     if (materials[id]) throw new HttpError(400, 'มีรหัส ' + id + ' อยู่แล้ว');
-    materials[id] = { name, type, unit, price: Number(price) || 0, safetyStock: Number(safetyStock) || 0, conversionRate: Number(conversionRate) || 1 };
+    materials[id] = {
+      name, type, unit, price: Number(price) || 0, safetyStock: Number(safetyStock) || 0, conversionRate: Number(conversionRate) || 1,
+      purchaseUnit: purchaseUnit || unit, moq: (moq === undefined || moq === null || moq === '') ? null : Number(moq),
+      maxStock: (maxStock === undefined || maxStock === null || maxStock === '') ? null : Number(maxStock),
+      shelfLifeMonths: (shelfLifeMonths === undefined || shelfLifeMonths === null || shelfLifeMonths === '') ? null : Number(shelfLifeMonths),
+      supplierName: supplierName || null, note: note || null, active: active === undefined ? true : !!active,
+    };
     return { materialId: id, ...materials[id] };
   }
 
-  function updateMaterial(materialId, { name, type, unit, price, safetyStock, conversionRate }) {
+  function updateMaterial(materialId, { name, type, unit, price, safetyStock, conversionRate, purchaseUnit, moq, maxStock, shelfLifeMonths, supplierName, note, active }) {
     const m = materials[materialId];
     if (!m) throw new HttpError(404, 'ไม่พบรหัส: ' + materialId);
     if (type !== undefined && type !== 'RAW_MATERIAL' && type !== 'PACKAGING') throw new HttpError(400, 'type ต้องเป็น RAW_MATERIAL หรือ PACKAGING');
@@ -1061,6 +1081,13 @@ function createStore() {
     if (price !== undefined) m.price = Number(price) || 0;
     if (safetyStock !== undefined) m.safetyStock = Number(safetyStock) || 0;
     if (conversionRate !== undefined) m.conversionRate = Number(conversionRate) || 1;
+    if (purchaseUnit !== undefined) m.purchaseUnit = purchaseUnit || m.unit;
+    if (moq !== undefined) m.moq = (moq === null || moq === '') ? null : Number(moq);
+    if (maxStock !== undefined) m.maxStock = (maxStock === null || maxStock === '') ? null : Number(maxStock);
+    if (shelfLifeMonths !== undefined) m.shelfLifeMonths = (shelfLifeMonths === null || shelfLifeMonths === '') ? null : Number(shelfLifeMonths);
+    if (supplierName !== undefined) m.supplierName = supplierName || null;
+    if (note !== undefined) m.note = note || null;
+    if (active !== undefined) m.active = !!active;
     return { materialId, ...m };
   }
 
@@ -1124,11 +1151,16 @@ function createStore() {
       productId,
       productName: products[productId] ? products[productId].name : productId,
       version: bom.version,
+      effectiveDate: bom.effectiveDate,
+      batchYieldQty: bom.batchYieldQty ?? 1,
+      batchYieldUnit: bom.batchYieldUnit ?? 'ชิ้น',
+      lossPct: bom.lossPct ?? 0,
+      yieldPct: bom.yieldPct ?? 100,
       components: bom.details.map((d) => ({
         bomDetailId: d.bomDetailId, componentType: d.componentType, componentId: d.componentId,
-        name: d.componentType === 'SEMI_FINISHED' ? (products[d.componentId] || {}).name : (materials[d.componentId] || {}).name,
-        quantity: d.quantity, unit: d.unit, lossPct: d.lossPct, yieldPct: d.yieldPct,
-        children: d.componentType === 'SEMI_FINISHED' ? getBomTree(d.componentId, asOfDate) : null,
+        name: (d.componentType === 'SEMI_FINISHED' || d.componentType === 'WIP') ? (products[d.componentId] || {}).name : (materials[d.componentId] || {}).name,
+        quantity: d.quantity, unit: d.unit,
+        children: (d.componentType === 'SEMI_FINISHED' || d.componentType === 'WIP') ? getBomTree(d.componentId, asOfDate) : null,
       })),
     };
   }
@@ -1143,12 +1175,12 @@ function createStore() {
   }
 
   function addBomDetail(productId, detail, asOfDate) {
-    if (detail.componentType === 'SEMI_FINISHED') {
+    if (detail.componentType === 'SEMI_FINISHED' || detail.componentType === 'WIP') {
       const repo = toEngineRepo(asOfDate);
       const cycle = wouldCreateCycle(productId, detail.componentId, (pid) => repo.getSemiFinishedChildren(pid));
       if (cycle) throw new CircularBomError([productId, detail.componentId]);
     }
-    if (!boms[productId]) boms[productId] = { version: 'v1.0', effectiveDate: asOfDate, details: [] };
+    if (!boms[productId]) boms[productId] = { version: 'v1.0', effectiveDate: asOfDate, batchYieldQty: 1, batchYieldUnit: 'ชิ้น', lossPct: 0, yieldPct: 100, details: [] };
     const bomDetailId = 'd' + nextBomDetailId++;
     boms[productId].details.push({ bomDetailId, ...detail });
     return boms[productId];
@@ -1159,6 +1191,28 @@ function createStore() {
     const before = boms[productId].details.length;
     boms[productId].details = boms[productId].details.filter((d) => d.bomDetailId !== bomDetailId);
     if (boms[productId].details.length === before) throw new HttpError(404, 'ไม่พบ Component id=' + bomDetailId + ' ใน BOM ของ ' + productId);
+    return boms[productId];
+  }
+
+  function updateBomDetail(productId, bomDetailId, patch, asOfDate) {
+    if (!boms[productId]) throw new HttpError(404, 'ไม่พบ BOM ของ ' + productId);
+    const detail = boms[productId].details.find((d) => d.bomDetailId === bomDetailId);
+    if (!detail) throw new HttpError(404, 'ไม่พบ Component id=' + bomDetailId + ' ใน BOM ของ ' + productId);
+    const merged = { ...detail, ...patch };
+    if ((merged.componentType === 'SEMI_FINISHED' || merged.componentType === 'WIP') && asOfDate) {
+      const repo = toEngineRepo(asOfDate);
+      const cycle = wouldCreateCycle(productId, merged.componentId, (pid) => repo.getSemiFinishedChildren(pid));
+      if (cycle) throw new CircularBomError([productId, merged.componentId]);
+    }
+    Object.assign(detail, patch);
+    return boms[productId];
+  }
+
+  function updateBomHeader(productId, patch) {
+    if (!boms[productId]) throw new HttpError(404, 'ยังไม่มี BOM ของ ' + productId + ' กรุณาเพิ่ม Component อย่างน้อย 1 รายการก่อน');
+    if (patch.batchYieldQty !== undefined && Number(patch.batchYieldQty) <= 0) throw new HttpError(400, 'จำนวนที่ผลิตได้/Batch ต้องมากกว่า 0');
+    if (patch.yieldPct !== undefined && Number(patch.yieldPct) <= 0) throw new HttpError(400, 'Yield % ต้องมากกว่า 0');
+    Object.assign(boms[productId], patch);
     return boms[productId];
   }
 
@@ -1331,16 +1385,16 @@ function createStore() {
 
   return {
     products, materials, suppliers,
-    createProduct, deleteProduct, createMaterial, updateMaterial, deleteMaterial,
+    createProduct, updateProduct, deleteProduct, createMaterial, updateMaterial, deleteMaterial,
     upsertForecast, addForecastAdjustment, listForecast, calculateMrpForPeriod,
-    getBomTree, whereUsed, addBomDetail, removeBomDetail,
+    getBomTree, whereUsed, addBomDetail, removeBomDetail, updateBomDetail, updateBomHeader,
     createPurchaseOrder, getPurchaseOrder, listPurchaseOrdersTracking, receiveGoods,
     getDashboardPurchasing, getDashboardExecutive,
     snapshot, hydrate,
   };
 }
 
-const MUTATORS = ['createProduct', 'deleteProduct', 'createMaterial', 'updateMaterial', 'deleteMaterial', 'addBomDetail', 'removeBomDetail', 'upsertForecast', 'addForecastAdjustment', 'createPurchaseOrder', 'receiveGoods'];
+const MUTATORS = ['createProduct', 'updateProduct', 'deleteProduct', 'createMaterial', 'updateMaterial', 'deleteMaterial', 'addBomDetail', 'removeBomDetail', 'updateBomDetail', 'updateBomHeader', 'upsertForecast', 'addForecastAdjustment', 'createPurchaseOrder', 'receiveGoods'];
 
 /* ============================================================================
    PERSISTENCE — Firestore (client-side, ดู FIREBASE_CONFIG ด้านบนสุดของไฟล์)
@@ -1391,6 +1445,7 @@ const ICONS = {
   chevronRight: <polyline points="9 6 15 12 9 18" />,
   trash: <><polyline points="4 7 20 7" /><path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13" /><line x1="10" y1="11" x2="10" y2="17" /><line x1="14" y1="11" x2="14" y2="17" /><path d="M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3" /></>,
   pencil: <><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></>,
+  copy: <><rect x="9" y="9" width="12" height="12" rx="1.5" /><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1" /></>,
   search: <><circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></>,
   alertTriangle: <><path d="M12 3 2 20h20Z" /><line x1="12" y1="9" x2="12" y2="13.5" /><circle cx="12" cy="16.7" r="0.6" fill="currentColor" stroke="none" /></>,
   clock: <><circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 15.5 14" /></>,
@@ -1429,9 +1484,10 @@ function StatusBadge({ status }) {
   );
 }
 
-const TYPE_LABEL = { SEMI_FINISHED: 'กึ่งสำเร็จรูป', RAW_MATERIAL: 'วัตถุดิบ', PACKAGING: 'บรรจุภัณฑ์' };
-const TYPE_COLOR = { SEMI_FINISHED: 'text-amber-700 bg-amber-50 ring-amber-600/20', RAW_MATERIAL: 'text-slate-600 bg-slate-100 ring-slate-500/10', PACKAGING: 'text-sky-700 bg-sky-50 ring-sky-600/20' };
-const TYPE_ICON = { SEMI_FINISHED: 'layers', RAW_MATERIAL: 'wheat', PACKAGING: 'package' };
+const TYPE_LABEL = { SEMI_FINISHED: 'กึ่งสำเร็จรูป', WIP: 'WIP', RAW_MATERIAL: 'วัตถุดิบ', PACKAGING: 'บรรจุภัณฑ์' };
+const TYPE_COLOR = { SEMI_FINISHED: 'text-amber-700 bg-amber-50 ring-amber-600/20', WIP: 'text-violet-700 bg-violet-50 ring-violet-600/20', RAW_MATERIAL: 'text-slate-600 bg-slate-100 ring-slate-500/10', PACKAGING: 'text-sky-700 bg-sky-50 ring-sky-600/20' };
+const TYPE_ICON = { SEMI_FINISHED: 'layers', WIP: 'boxes', RAW_MATERIAL: 'wheat', PACKAGING: 'package' };
+const PRODUCT_TYPE_LABEL = { FINISHED: 'Finished', SEMI_FINISHED: 'กึ่งสำเร็จรูป', WIP: 'WIP' };
 
 function TypeTag({ type }) {
   return (
@@ -1876,7 +1932,13 @@ function MrpTab({ store }) {
     const all = [...mrpResult.base, ...mrpResult.incremental];
     const toOrder = all.filter((r) => r.netRequirement > 0);
     const value = toOrder.reduce((s, r) => s + r.requirementValue, 0);
-    const risky = toOrder.filter((r) => { const a = actualPurchase[r.type + r.id]; return a !== undefined && a !== '' && Number(a) < r.netRequirement; });
+    const risky = toOrder.filter((r) => {
+      const a = actualPurchase[r.type + r.id];
+      if (a === undefined || a === '') return false;
+      const isMaterial = r.type === 'RAW_MATERIAL' || r.type === 'PACKAGING';
+      const conversionRate = (isMaterial && materials[r.id]?.conversionRate) || 1;
+      return Number(a) * conversionRate < r.netRequirement;
+    });
     return { count: toOrder.length, value, risky: risky.length };
   }, [mrpResult, actualPurchase]);
 
@@ -1897,27 +1959,33 @@ function MrpTab({ store }) {
       )}
       {mrpResult && (
         <>
-          <MrpTable title="MRP หลัก (จาก Forecast ประจำเดือน)" rows={mrpResult.base} nameOf={nameOf} expanded={expanded} setExpanded={setExpanded} actualPurchase={actualPurchase} setActualPurchase={setActualPurchase} />
-          {mrpResult.incremental.length > 0 && <MrpTable title="MRP ส่วนเพิ่มระหว่างเดือน (Adjustment — แยกจากยอดหลัก ไม่ปนกัน)" rows={mrpResult.incremental} nameOf={nameOf} expanded={expanded} setExpanded={setExpanded} actualPurchase={actualPurchase} setActualPurchase={setActualPurchase} keyPrefix="inc-" />}
+          <MrpTable title="MRP หลัก (จาก Forecast ประจำเดือน)" rows={mrpResult.base} nameOf={nameOf} materials={materials} expanded={expanded} setExpanded={setExpanded} actualPurchase={actualPurchase} setActualPurchase={setActualPurchase} />
+          {mrpResult.incremental.length > 0 && <MrpTable title="MRP ส่วนเพิ่มระหว่างเดือน (Adjustment — แยกจากยอดหลัก ไม่ปนกัน)" rows={mrpResult.incremental} nameOf={nameOf} materials={materials} expanded={expanded} setExpanded={setExpanded} actualPurchase={actualPurchase} setActualPurchase={setActualPurchase} keyPrefix="inc-" />}
         </>
       )}
     </div>
   );
 }
 
-function MrpTable({ title, rows, nameOf, expanded, setExpanded, actualPurchase, setActualPurchase, keyPrefix = '' }) {
+function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actualPurchase, setActualPurchase, keyPrefix = '' }) {
   return (
     <div className="mt-6">
       <h3 className="text-sm font-semibold text-slate-700">{title}</h3>
       <div className="mt-2 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
-          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">Material</th><th className="px-4 py-3 text-right">Gross</th><th className="px-4 py-3 text-right">Stock</th><th className="px-4 py-3 text-right">Open PO</th><th className="px-4 py-3 text-right">Safety Stock</th><th className="px-4 py-3 text-right">Net Requirement</th><th className="px-4 py-3 text-right">สั่งจริง</th><th className="px-4 py-3">สถานะ</th></tr></thead>
+          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">Material</th><th className="px-4 py-3 text-right">Gross</th><th className="px-4 py-3 text-right">Stock</th><th className="px-4 py-3 text-right">Open PO</th><th className="px-4 py-3 text-right">Safety Stock</th><th className="px-4 py-3 text-right">Net Requirement</th><th className="px-4 py-3 text-right" title="ปริมาณที่ต้องสั่งซื้อ แปลงเป็นหน่วยที่ใช้สั่งซื้อจริง">ต้องซื้อ (หน่วยซื้อ)</th><th className="px-4 py-3 text-right">สั่งจริง</th><th className="px-4 py-3">สถานะ</th></tr></thead>
           <tbody>
             {rows.map((r) => {
               const rowKey = keyPrefix + r.type + r.id;
               const isOpen = expanded === rowKey;
               const actual = actualPurchase[rowKey];
-              const short = actual !== undefined && actual !== '' && Number(actual) < r.netRequirement;
+              const isMaterial = r.type === 'RAW_MATERIAL' || r.type === 'PACKAGING';
+              const mat = materials?.[r.id];
+              const purchaseUnit = mat?.purchaseUnit || mat?.unit || r.unit;
+              const conversionRate = (isMaterial && mat?.conversionRate) || 1;
+              const actualInBaseUnit = actual !== undefined && actual !== '' ? Number(actual) * conversionRate : null;
+              const short = actualInBaseUnit !== null && actualInBaseUnit < r.netRequirement;
+              const actualPlaceholder = isMaterial ? (r.purchaseQtyNeeded ?? 0) : r.netRequirement;
               return (
                 <Fragment key={rowKey}>
                   <tr className="cursor-pointer border-b border-slate-50 last:border-0 hover:bg-slate-50/60" onClick={() => setExpanded(isOpen ? null : rowKey)}>
@@ -1927,19 +1995,23 @@ function MrpTable({ title, rows, nameOf, expanded, setExpanded, actualPurchase, 
                     <td className="px-4 py-3 text-right tabular text-slate-500">{fmt(r.openQty)}</td>
                     <td className="px-4 py-3 text-right tabular text-slate-500">{fmt(r.safetyStock)}</td>
                     <td className="px-4 py-3 text-right tabular font-semibold text-slate-900">{fmt(r.netRequirement)}</td>
+                    <td className="px-4 py-3 text-right tabular font-semibold text-amber-700">{isMaterial && r.purchaseQtyNeeded !== null && r.purchaseQtyNeeded !== undefined ? `${fmt(r.purchaseQtyNeeded)} ${purchaseUnit}` : '—'}</td>
                     <td className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
-                      <input type="number" value={actual ?? ''} onChange={(e) => setActualPurchase((prev) => ({ ...prev, [rowKey]: e.target.value }))} placeholder={r.netRequirement > 0 ? String(r.netRequirement) : '0'} className={`w-24 rounded-lg border px-2 py-1 text-right text-sm tabular outline-none ${short ? 'border-red-300 bg-red-50 text-red-700' : 'border-slate-200 focus:border-amber-500 focus:ring-1 focus:ring-amber-500'}`} />
+                      <div className="flex items-center justify-end gap-1.5">
+                        <input type="number" value={actual ?? ''} onChange={(e) => setActualPurchase((prev) => ({ ...prev, [rowKey]: e.target.value }))} placeholder={actualPlaceholder > 0 ? String(actualPlaceholder) : '0'} className={`w-24 rounded-lg border px-2 py-1 text-right text-sm tabular outline-none ${short ? 'border-red-300 bg-red-50 text-red-700' : 'border-slate-200 focus:border-amber-500 focus:ring-1 focus:ring-amber-500'}`} />
+                        <span className="text-xs text-slate-400">{isMaterial ? purchaseUnit : r.unit}</span>
+                      </div>
                     </td>
                     <td className="px-4 py-3"><StatusBadge status={r.status} /></td>
                   </tr>
                   {isOpen && (
-                    <tr className="bg-slate-50/40"><td colSpan={8} className="px-4 py-3">
+                    <tr className="bg-slate-50/40"><td colSpan={9} className="px-4 py-3">
                       <div className="rounded-lg border border-dashed border-slate-300 bg-white p-3">
                         <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">ที่มาของ Requirement (Drill Down)</p>
                         <ul className="space-y-1 text-xs text-slate-600">
                           {r.breakdown.map((b, i) => <li key={i} className="flex justify-between border-b border-dashed border-slate-100 py-1 tabular last:border-0"><span>{b.source.path.map((p) => nameOf('SEMI_FINISHED', p)).join(' → ')}</span><span className="font-medium">{fmt(b.qty)} {r.unit}</span></li>)}
                         </ul>
-                        {r.purchaseQtyNeeded > 0 && <p className="mt-2 text-xs text-slate-500">ต้องสั่งซื้อ ≈ <span className="font-semibold text-slate-800">{r.purchaseQtyNeeded}</span> หน่วยซื้อ</p>}
+                        {isMaterial && r.purchaseQtyNeeded > 0 && <p className="mt-2 text-xs text-slate-500">ต้องสั่งซื้อ ≈ <span className="font-semibold text-slate-800">{fmt(r.purchaseQtyNeeded)} {purchaseUnit}</span> (1 {purchaseUnit} = {fmt(mat?.conversionRate ?? 1)} {r.unit})</p>}
                       </div>
                     </td></tr>
                   )}
@@ -1969,6 +2041,28 @@ function BomTab({ store, refresh }) {
   const [newProductType, setNewProductType] = useState('FINISHED');
   const [productError, setProductError] = useState(null);
   const [deleteError, setDeleteError] = useState(null);
+  const [editingProduct, setEditingProduct] = useState(false);
+  const [productDraft, setProductDraft] = useState({ name: '', type: 'FINISHED' });
+  const [productEditError, setProductEditError] = useState(null);
+
+  function startEditProduct() {
+    setProductDraft({ name: products[selectedProduct].name, type: products[selectedProduct].type });
+    setProductEditError(null);
+    setEditingProduct(true);
+  }
+  function cancelEditProduct() {
+    setEditingProduct(false);
+    setProductEditError(null);
+  }
+  function saveEditProduct() {
+    if (!productDraft.name.trim()) { setProductEditError('กรุณาระบุชื่อสินค้า'); return; }
+    try {
+      store.updateProduct(selectedProduct, { name: productDraft.name.trim(), type: productDraft.type });
+      setEditingProduct(false);
+      setProductEditError(null);
+      refresh();
+    } catch (e) { setProductEditError(e.message); }
+  }
 
   function submitNewProduct() {
     if (!newProductName.trim()) return;
@@ -1993,7 +2087,9 @@ function BomTab({ store, refresh }) {
     } catch (e) { setDeleteError(e.message); }
   }
 
-  const filtered = Object.entries(products).filter(([, p]) => search === '' || p.name.includes(search));
+  const filtered = Object.entries(products)
+    .filter(([id, p]) => search === '' || p.name.includes(search) || id.toUpperCase().includes(search.toUpperCase()))
+    .sort(([idA], [idB]) => idA.localeCompare(idB));
 
   return (
     <div>
@@ -2012,6 +2108,7 @@ function BomTab({ store, refresh }) {
                 <select value={newProductType} onChange={(e) => setNewProductType(e.target.value)} className="w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
                   <option value="FINISHED">Finished Product</option>
                   <option value="SEMI_FINISHED">Semi-Finished</option>
+                  <option value="WIP">WIP Product</option>
                 </select>
                 <input value={newProductId} onChange={(e) => setNewProductId(e.target.value)} placeholder="รหัสสินค้า (ไม่กรอก = สร้างอัตโนมัติ)" className="mt-2 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
                 <input value={newProductName} onChange={(e) => setNewProductName(e.target.value)} placeholder="ชื่อสินค้า" className="mt-2 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
@@ -2026,13 +2123,25 @@ function BomTab({ store, refresh }) {
           <p className="mb-1.5 mt-4 px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Finished Product</p>
           <div className="space-y-1">
             {filtered.filter(([, p]) => p.type === 'FINISHED').map(([id, p]) => (
-              <button key={id} onClick={() => { setSelectedProduct(id); setTab('master'); }} className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition ${selectedProduct === id ? 'bg-slate-900 font-medium text-white' : 'text-slate-600 hover:bg-slate-100'}`}>{p.name}</button>
+              <button key={id} onClick={() => { setSelectedProduct(id); setTab('master'); }} className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition ${selectedProduct === id ? 'bg-slate-900 font-medium text-white' : 'text-slate-600 hover:bg-slate-100'}`}>
+                <span className={`mr-1.5 text-xs tabular ${selectedProduct === id ? 'text-slate-300' : 'text-slate-400'}`}>{id}</span>{p.name}
+              </button>
             ))}
           </div>
           <p className="mb-1.5 mt-4 px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Semi-Finished</p>
           <div className="space-y-1">
             {filtered.filter(([, p]) => p.type === 'SEMI_FINISHED').map(([id, p]) => (
-              <button key={id} onClick={() => { setSelectedProduct(id); setTab('master'); }} className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition ${selectedProduct === id ? 'bg-slate-900 font-medium text-white' : 'text-slate-600 hover:bg-slate-100'}`}>{p.name}</button>
+              <button key={id} onClick={() => { setSelectedProduct(id); setTab('master'); }} className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition ${selectedProduct === id ? 'bg-slate-900 font-medium text-white' : 'text-slate-600 hover:bg-slate-100'}`}>
+                <span className={`mr-1.5 text-xs tabular ${selectedProduct === id ? 'text-slate-300' : 'text-slate-400'}`}>{id}</span>{p.name}
+              </button>
+            ))}
+          </div>
+          <p className="mb-1.5 mt-4 px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">WIP Product</p>
+          <div className="space-y-1">
+            {filtered.filter(([, p]) => p.type === 'WIP').map(([id, p]) => (
+              <button key={id} onClick={() => { setSelectedProduct(id); setTab('master'); }} className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition ${selectedProduct === id ? 'bg-slate-900 font-medium text-white' : 'text-slate-600 hover:bg-slate-100'}`}>
+                <span className={`mr-1.5 text-xs tabular ${selectedProduct === id ? 'text-slate-300' : 'text-slate-400'}`}>{id}</span>{p.name}
+              </button>
             ))}
           </div>
         </div>
@@ -2042,8 +2151,33 @@ function BomTab({ store, refresh }) {
           ) : (
             <>
               <div className="flex items-start justify-between gap-3">
-                <div><h2 className="font-display text-xl font-semibold text-slate-900">{products[selectedProduct].name}</h2><p className="text-xs text-slate-400">{selectedProduct} · {products[selectedProduct].type === 'FINISHED' ? 'Finished' : 'กึ่งสำเร็จรูป'}</p></div>
-                <button onClick={handleDeleteProduct} title="ลบสินค้านี้" className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-red-200 px-2.5 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50"><Icon name="trash" size={13} /> ลบสินค้า</button>
+                {!editingProduct ? (
+                  <>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h2 className="font-display text-xl font-semibold text-slate-900">{products[selectedProduct].name}</h2>
+                        <button onClick={startEditProduct} title="แก้ไขชื่อ/ประเภทสินค้า" className="text-slate-400 hover:text-slate-600"><Icon name="pencil" size={13} /></button>
+                      </div>
+                      <p className="text-xs text-slate-400">{selectedProduct} · {PRODUCT_TYPE_LABEL[products[selectedProduct].type] || products[selectedProduct].type}</p>
+                    </div>
+                    <button onClick={handleDeleteProduct} title="ลบสินค้านี้" className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-red-200 px-2.5 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50"><Icon name="trash" size={13} /> ลบสินค้า</button>
+                  </>
+                ) : (
+                  <div className="flex flex-wrap items-end gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                    <div><label className="text-xs text-slate-500">รหัสสินค้า</label><input value={selectedProduct} disabled className="mt-1 block w-28 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-sm text-slate-400 outline-none" /></div>
+                    <div><label className="text-xs text-slate-500">ชื่อสินค้า</label><input value={productDraft.name} onChange={(e) => setProductDraft((d) => ({ ...d, name: e.target.value }))} className="mt-1 block w-64 rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+                    <div><label className="text-xs text-slate-500">ประเภท</label>
+                      <select value={productDraft.type} onChange={(e) => setProductDraft((d) => ({ ...d, type: e.target.value }))} className="mt-1 block rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
+                        <option value="FINISHED">Finished Product</option>
+                        <option value="SEMI_FINISHED">Semi-Finished</option>
+                        <option value="WIP">WIP Product</option>
+                      </select>
+                    </div>
+                    {productEditError && <p className="text-xs text-red-600">{productEditError}</p>}
+                    <button onClick={cancelEditProduct} className="rounded-lg px-3 py-1.5 text-sm font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
+                    <button onClick={saveEditProduct} className="rounded-lg bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700">บันทึก</button>
+                  </div>
+                )}
               </div>
               {deleteError && <div className="mt-2 flex items-start gap-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700"><Icon name="alertTriangle" size={14} className="mt-0.5 shrink-0" /> {deleteError}</div>}
               <nav className="mt-4 flex gap-6 border-b border-slate-200 text-sm">
@@ -2065,15 +2199,23 @@ function BomTab({ store, refresh }) {
 }
 
 function blankBomRow() {
-  return { key: 'r' + Math.random().toString(36).slice(2, 9), type: 'RAW_MATERIAL', id: '', qty: '', loss: '0', yield: '100' };
+  return { key: 'r' + Math.random().toString(36).slice(2, 9), type: 'RAW_MATERIAL', id: '', qty: '' };
 }
+
+function isProducedType(type) { return type === 'SEMI_FINISHED' || type === 'WIP'; }
 
 function BomMaster({ productId, products, materials, store, refresh }) {
   const [adding, setAdding] = useState(false);
   const [rows, setRows] = useState([blankBomRow()]);
   const [submitError, setSubmitError] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editDraft, setEditDraft] = useState(null);
+  const [editingHeader, setEditingHeader] = useState(false);
+  const [headerDraft, setHeaderDraft] = useState({ version: '', effectiveDate: TODAY, batchYieldQty: '1', batchYieldUnit: 'ชิ้น', lossPct: '0', yieldPct: '100' });
+  const [copyOpen, setCopyOpen] = useState(false);
+  const [copySourceId, setCopySourceId] = useState('');
 
-  const tree = store.getBomTree(productId, TODAY) || { productId, productName: products[productId]?.name || productId, version: null, components: [] };
+  const tree = store.getBomTree(productId, TODAY) || { productId, productName: products[productId]?.name || productId, version: null, effectiveDate: null, batchYieldQty: 1, batchYieldUnit: 'ชิ้น', lossPct: 0, yieldPct: 100, components: [] };
 
   const totalsByUnit = useMemo(() => {
     const map = {};
@@ -2081,9 +2223,21 @@ function BomMaster({ productId, products, materials, store, refresh }) {
     return Object.entries(map);
   }, [tree.components]);
 
+  const productOptions = useMemo(() => Object.entries(products).filter(([id]) => id !== productId).map(([id, p]) => [id, `${id} — ${p.name}`]), [products, productId]);
+
   function optionsFor(type) {
     if (type === 'SEMI_FINISHED') return Object.entries(products).filter(([id, p]) => p.type === 'SEMI_FINISHED' && id !== productId);
+    if (type === 'WIP') return Object.entries(products).filter(([id, p]) => p.type === 'WIP' && id !== productId);
     return Object.entries(materials).filter(([, m]) => m.type === type);
+  }
+
+  function unitFor(type, id) {
+    if (!id) return '';
+    if (isProducedType(type)) {
+      const t = store.getBomTree(id, TODAY);
+      return (t && t.batchYieldUnit) || 'ชิ้น';
+    }
+    return (materials[id] && materials[id].unit) || '';
   }
 
   function updateRow(key, patch) {
@@ -2098,6 +2252,7 @@ function BomMaster({ productId, products, materials, store, refresh }) {
   function startAdding() {
     setRows([blankBomRow()]);
     setSubmitError(null);
+    setEditingId(null);
     setAdding(true);
   }
   function cancelAdding() {
@@ -2112,8 +2267,8 @@ function BomMaster({ productId, products, materials, store, refresh }) {
     setSubmitError(null);
     try {
       rows.forEach((r) => {
-        const unit = r.type === 'SEMI_FINISHED' ? 'ชิ้น' : (materials[r.id]?.unit || 'kg');
-        store.addBomDetail(productId, { componentType: r.type, componentId: r.id, quantity: Number(r.qty), unit, lossPct: Number(r.loss), yieldPct: Number(r.yield) }, TODAY);
+        const unit = unitFor(r.type, r.id) || (isProducedType(r.type) ? 'ชิ้น' : 'kg');
+        store.addBomDetail(productId, { componentType: r.type, componentId: r.id, quantity: Number(r.qty), unit }, TODAY);
       });
       setRows([blankBomRow()]);
       setAdding(false);
@@ -2125,26 +2280,148 @@ function BomMaster({ productId, products, materials, store, refresh }) {
     try { store.removeBomDetail(productId, bomDetailId); refresh(); } catch (e) { setSubmitError(e.message); }
   }
 
+  function startEditRow(c) {
+    setAdding(false);
+    setSubmitError(null);
+    setEditingId(c.bomDetailId);
+    setEditDraft({ type: c.componentType, id: c.componentId, qty: String(c.quantity) });
+  }
+  function cancelEditRow() {
+    setEditingId(null);
+    setEditDraft(null);
+  }
+  function saveEditRow(bomDetailId) {
+    if (!editDraft.id || editDraft.qty === '') { setSubmitError('กรุณาเลือกรายการและระบุจำนวน'); return; }
+    const unit = unitFor(editDraft.type, editDraft.id) || (isProducedType(editDraft.type) ? 'ชิ้น' : 'kg');
+    try {
+      store.updateBomDetail(productId, bomDetailId, {
+        componentType: editDraft.type, componentId: editDraft.id, quantity: Number(editDraft.qty), unit,
+      }, TODAY);
+      setEditingId(null);
+      setEditDraft(null);
+      setSubmitError(null);
+      refresh();
+    } catch (e) { setSubmitError(e.message); }
+  }
+
+  function startEditHeader() {
+    setHeaderDraft({
+      version: tree.version || 'v1.0', effectiveDate: tree.effectiveDate || TODAY,
+      batchYieldQty: String(tree.batchYieldQty ?? 1), batchYieldUnit: tree.batchYieldUnit ?? 'ชิ้น', lossPct: String(tree.lossPct ?? 0), yieldPct: String(tree.yieldPct ?? 100),
+    });
+    setSubmitError(null);
+    setEditingHeader(true);
+  }
+  function saveHeader() {
+    if (!headerDraft.version.trim() || !headerDraft.effectiveDate) { setSubmitError('กรุณาระบุ Version และวันที่มีผลให้ครบ'); return; }
+    if (!(Number(headerDraft.batchYieldQty) > 0)) { setSubmitError('จำนวนที่ผลิตได้/Batch ต้องมากกว่า 0'); return; }
+    if (!(Number(headerDraft.yieldPct) > 0)) { setSubmitError('Yield % ต้องมากกว่า 0'); return; }
+    try {
+      store.updateBomHeader(productId, {
+        version: headerDraft.version.trim(), effectiveDate: headerDraft.effectiveDate,
+        batchYieldQty: Number(headerDraft.batchYieldQty), batchYieldUnit: headerDraft.batchYieldUnit.trim() || 'ชิ้น', lossPct: Number(headerDraft.lossPct), yieldPct: Number(headerDraft.yieldPct),
+      });
+      setEditingHeader(false);
+      setSubmitError(null);
+      refresh();
+    } catch (e) { setSubmitError(e.message); }
+  }
+
+  function doCopyBom() {
+    if (!copySourceId) return;
+    const sourceTree = store.getBomTree(copySourceId, TODAY);
+    if (!sourceTree || sourceTree.components.length === 0) { setSubmitError('สินค้าที่เลือกยังไม่มี BOM ให้คัดลอก'); return; }
+    const hasExisting = tree.components.length > 0;
+    let replace = true;
+    if (hasExisting) {
+      replace = window.confirm(`BOM ปัจจุบันมี ${tree.components.length} รายการอยู่แล้ว\n\nกด "ตกลง" เพื่อลบของเดิมทั้งหมดแล้วแทนที่ด้วย BOM ที่คัดลอกมา\nกด "ยกเลิก" เพื่อเพิ่มรายการที่คัดลอกต่อท้ายของเดิมแทน`);
+    }
+    try {
+      if (replace && hasExisting) {
+        tree.components.forEach((c) => store.removeBomDetail(productId, c.bomDetailId));
+      }
+      sourceTree.components.forEach((c) => {
+        store.addBomDetail(productId, { componentType: c.componentType, componentId: c.componentId, quantity: c.quantity, unit: c.unit }, TODAY);
+      });
+      store.updateBomHeader(productId, { batchYieldQty: sourceTree.batchYieldQty ?? 1, batchYieldUnit: sourceTree.batchYieldUnit ?? 'ชิ้น', lossPct: sourceTree.lossPct ?? 0, yieldPct: sourceTree.yieldPct ?? 100 });
+      setCopyOpen(false);
+      setCopySourceId('');
+      setSubmitError(null);
+      refresh();
+    } catch (e) { setSubmitError(e.message); }
+  }
+
   return (
     <div>
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
-        <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">{tree.version || 'ยังไม่มี BOM'}</span>
-        <span className="text-xs text-slate-400">ณ {TODAY}</span>
+        {!editingHeader ? (
+          <>
+            <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">{tree.version || 'ยังไม่มี BOM'}</span>
+            <span className="text-xs text-slate-400">ณ {tree.effectiveDate || TODAY}</span>
+            {tree.version && (
+              <span className="inline-flex items-center gap-2 rounded-full bg-slate-50 px-2.5 py-1 text-xs text-slate-500">
+                <span>Loss {fmt(tree.lossPct ?? 0)}%</span><span className="text-slate-300">·</span>
+                <span>Yield {fmt(tree.yieldPct ?? 100)}%</span><span className="text-slate-300">·</span>
+                <span title="จำนวนที่ผลิตได้จาก Batch นี้">ผลิตได้/Batch {fmt(tree.batchYieldQty ?? 1)} {tree.batchYieldUnit ?? 'ชิ้น'}</span>
+              </span>
+            )}
+            {tree.version && <button onClick={startEditHeader} className="inline-flex items-center gap-1 text-xs font-medium text-slate-400 hover:text-slate-600"><Icon name="pencil" size={12} /> แก้ไข</button>}
+            <div className="ml-auto">
+              <button onClick={() => { setCopyOpen((v) => !v); setSubmitError(null); }} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"><Icon name="copy" size={13} /> คัดลอก BOM จากสินค้าอื่น</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div><label className="text-xs text-slate-500">Version</label><input value={headerDraft.version} onChange={(e) => setHeaderDraft((h) => ({ ...h, version: e.target.value }))} className="mt-1 block w-28 rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+            <div><label className="text-xs text-slate-500">วันที่มีผล</label><input type="date" value={headerDraft.effectiveDate} onChange={(e) => setHeaderDraft((h) => ({ ...h, effectiveDate: e.target.value }))} className="mt-1 block rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+            <div><label className="text-xs text-slate-500">Loss %</label><input type="number" value={headerDraft.lossPct} onChange={(e) => setHeaderDraft((h) => ({ ...h, lossPct: e.target.value }))} className="mt-1 block w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+            <div><label className="text-xs text-slate-500">Yield %</label><input type="number" value={headerDraft.yieldPct} onChange={(e) => setHeaderDraft((h) => ({ ...h, yieldPct: e.target.value }))} className="mt-1 block w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+            <div><label className="text-xs text-slate-500" title="จำนวนที่ผลิตได้จาก Batch นี้">ผลิตได้/Batch</label><input type="number" min="0" value={headerDraft.batchYieldQty} onChange={(e) => setHeaderDraft((h) => ({ ...h, batchYieldQty: e.target.value }))} className="mt-1 block w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+            <div><label className="text-xs text-slate-500">หน่วย</label><input value={headerDraft.batchYieldUnit} onChange={(e) => setHeaderDraft((h) => ({ ...h, batchYieldUnit: e.target.value }))} placeholder="ชิ้น" className="mt-1 block w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+            <button onClick={() => setEditingHeader(false)} className="rounded-lg px-3 py-1.5 text-sm font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
+            <button onClick={saveHeader} className="rounded-lg bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700">บันทึก</button>
+          </>
+        )}
       </div>
+      {copyOpen && (
+        <div className="mt-3 flex flex-wrap items-end gap-2 rounded-xl border border-dashed border-amber-300 bg-amber-50/50 p-3">
+          <div className="w-80"><label className="text-xs text-slate-500">คัดลอก BOM จากสินค้า</label>
+            <div className="mt-1">
+              <SearchableSelect options={productOptions} value={copySourceId} onChange={setCopySourceId} placeholder="พิมพ์ค้นหาสินค้าต้นแบบ..." />
+            </div>
+          </div>
+          <button onClick={() => { setCopyOpen(false); setCopySourceId(''); }} className="rounded-lg px-3 py-1.5 text-sm font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
+          <button onClick={doCopyBom} disabled={!copySourceId} className="rounded-lg bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-40">คัดลอกมาที่นี่</button>
+        </div>
+      )}
       <div className="mt-4 overflow-hidden rounded-t-xl border border-b-0 border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
-          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">Component</th><th className="px-4 py-3 text-right">Quantity</th><th className="px-4 py-3">Unit</th><th className="px-4 py-3 text-right">Loss %</th><th className="px-4 py-3 text-right">Yield %</th><th className="px-4 py-3"></th></tr></thead>
+          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">Component</th><th className="px-4 py-3 text-right">Quantity</th><th className="px-4 py-3">Unit</th><th className="px-4 py-3"></th></tr></thead>
           <tbody>
-            {tree.components.length === 0 && <tr><td colSpan={6} className="px-4 py-6 text-center text-sm text-slate-400">ยังไม่มี Component</td></tr>}
+            {tree.components.length === 0 && <tr><td colSpan={4} className="px-4 py-6 text-center text-sm text-slate-400">ยังไม่มี Component</td></tr>}
             {tree.components.map((c) => (
-              <tr key={c.bomDetailId} className="border-b border-slate-50 last:border-0">
-                <td className="px-4 py-3"><div className="flex items-center gap-2"><TypeTag type={c.componentType} /><span className="font-medium text-slate-800">{c.name}</span></div></td>
-                <td className="px-4 py-3 text-right tabular">{fmt(c.quantity)}</td>
-                <td className="px-4 py-3 text-slate-500">{c.unit}</td>
-                <td className="px-4 py-3 text-right tabular text-slate-500">{c.lossPct}%</td>
-                <td className="px-4 py-3 text-right tabular text-slate-500">{c.yieldPct}%</td>
-                <td className="px-4 py-3"><button onClick={() => removeComponent(c.bomDetailId)} className="text-slate-300 hover:text-red-500"><Icon name="trash" size={14} /></button></td>
-              </tr>
+              editingId === c.bomDetailId ? (
+                <tr key={c.bomDetailId} className="border-b border-slate-50 bg-amber-50/40 last:border-0">
+                  <td className="px-4 py-2">
+                    <div className="flex items-center gap-2">
+                      <select value={editDraft.type} onChange={(e) => setEditDraft((d) => ({ ...d, type: e.target.value, id: '' }))} className="rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
+                        <option value="RAW_MATERIAL">วัตถุดิบ</option><option value="PACKAGING">บรรจุภัณฑ์</option><option value="SEMI_FINISHED">กึ่งสำเร็จรูป</option><option value="WIP">WIP</option>
+                      </select>
+                      <div className="w-56"><SearchableSelect options={optionsFor(editDraft.type).map(([id, o]) => [id, `${id} — ${o.name}`])} value={editDraft.id} onChange={(id) => setEditDraft((d) => ({ ...d, id }))} placeholder="พิมพ์ค้นหารหัส/ชื่อ..." /></div>
+                    </div>
+                  </td>
+                  <td className="px-4 py-2 text-right"><input type="number" value={editDraft.qty} onChange={(e) => setEditDraft((d) => ({ ...d, qty: e.target.value }))} className="w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-right text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></td>
+                  <td className="px-4 py-2 text-slate-400">{unitFor(editDraft.type, editDraft.id) || c.unit}</td>
+                  <td className="px-4 py-2"><div className="flex items-center gap-2"><button onClick={() => saveEditRow(c.bomDetailId)} className="text-emerald-600 hover:text-emerald-700" title="บันทึก"><Icon name="check" size={15} /></button><button onClick={cancelEditRow} className="text-slate-400 hover:text-slate-600" title="ยกเลิก"><Icon name="x" size={15} /></button></div></td>
+                </tr>
+              ) : (
+                <tr key={c.bomDetailId} className="border-b border-slate-50 last:border-0">
+                  <td className="px-4 py-3"><div className="flex items-center gap-2"><TypeTag type={c.componentType} /><span className="text-xs tabular text-slate-400">{c.componentId}</span><span className="font-medium text-slate-800">{c.name}</span></div></td>
+                  <td className="px-4 py-3 text-right tabular">{fmt(c.quantity)}</td>
+                  <td className="px-4 py-3 text-slate-500">{c.unit}</td>
+                  <td className="px-4 py-3"><div className="flex items-center gap-2"><button onClick={() => startEditRow(c)} className="text-slate-400 hover:text-slate-600" title="แก้ไข"><Icon name="pencil" size={14} /></button><button onClick={() => removeComponent(c.bomDetailId)} className="text-slate-300 hover:text-red-500" title="ลบ"><Icon name="trash" size={14} /></button></div></td>
+                </tr>
+              )
             ))}
           </tbody>
           {tree.components.length > 0 && (
@@ -2157,7 +2434,7 @@ function BomMaster({ productId, products, materials, store, refresh }) {
                 <td className="px-4 py-3 font-medium text-slate-500">
                   {totalsByUnit.map(([u]) => (<div key={u}>{u}</div>))}
                 </td>
-                <td className="px-4 py-3" colSpan={3}></td>
+                <td className="px-4 py-3"></td>
               </tr>
             </tfoot>
           )}
@@ -2172,7 +2449,7 @@ function BomMaster({ productId, products, materials, store, refresh }) {
               <div key={r.key} className="flex flex-wrap items-end gap-2 border-b border-slate-50 pb-3 last:border-0 last:pb-0">
                 <div><label className="text-xs text-slate-500">ประเภท</label>
                   <select value={r.type} onChange={(e) => updateRow(r.key, { type: e.target.value, id: '' })} className="mt-1 block w-32 rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
-                    <option value="RAW_MATERIAL">วัตถุดิบ</option><option value="PACKAGING">บรรจุภัณฑ์</option><option value="SEMI_FINISHED">กึ่งสำเร็จรูป</option>
+                    <option value="RAW_MATERIAL">วัตถุดิบ</option><option value="PACKAGING">บรรจุภัณฑ์</option><option value="SEMI_FINISHED">กึ่งสำเร็จรูป</option><option value="WIP">WIP</option>
                   </select>
                 </div>
                 <div className="w-72"><label className="text-xs text-slate-500">รายการ</label>
@@ -2186,8 +2463,7 @@ function BomMaster({ productId, products, materials, store, refresh }) {
                   </div>
                 </div>
                 <div><label className="text-xs text-slate-500">จำนวน</label><input type="number" value={r.qty} onChange={(e) => updateRow(r.key, { qty: e.target.value })} className="mt-1 block w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
-                <div><label className="text-xs text-slate-500">Loss %</label><input type="number" value={r.loss} onChange={(e) => updateRow(r.key, { loss: e.target.value })} className="mt-1 block w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
-                <div><label className="text-xs text-slate-500">Yield %</label><input type="number" value={r.yield} onChange={(e) => updateRow(r.key, { yield: e.target.value })} className="mt-1 block w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+                <div><label className="text-xs text-slate-500">หน่วย</label><div className="mt-1 flex h-[38px] w-20 items-center rounded-lg border border-slate-100 bg-slate-50 px-2 text-sm text-slate-500">{unitFor(r.type, r.id) || '—'}</div></div>
                 <button onClick={() => removeRow(r.key)} disabled={rows.length === 1} className="rounded-lg px-2 py-1.5 text-slate-300 hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-40" title="ลบแถวนี้"><Icon name="trash" size={14} /></button>
               </div>
             ))}
@@ -2210,13 +2486,15 @@ function BomTreeNode({ node, depth = 0 }) {
   if (!node) return null;
   return (
     <div style={{ marginLeft: depth * 20 }}>
-      <div className="flex items-center gap-2 border-l-2 border-slate-100 py-1.5 pl-3">
+      <div className="flex flex-wrap items-center gap-2 border-l-2 border-slate-100 py-1.5 pl-3">
+        <span className="text-xs tabular text-slate-400">{node.productId}</span>
         <span className="text-sm font-medium text-slate-800">{node.productName}</span>
         <span className="text-xs text-slate-400">{node.version}</span>
+        <span className="text-[11px] text-slate-400">Loss {fmt(node.lossPct ?? 0)}% · Yield {fmt(node.yieldPct ?? 100)}% · ผลิตได้/Batch {fmt(node.batchYieldQty ?? 1)} {node.batchYieldUnit ?? 'ชิ้น'}</span>
       </div>
       {node.components.map((c) => (
         <div key={c.bomDetailId} style={{ marginLeft: (depth + 1) * 20 }} className="border-l-2 border-slate-100 py-1 pl-3">
-          <div className="flex items-center gap-2 text-sm"><TypeTag type={c.componentType} /><span className="text-slate-700">{c.name}</span><span className="tabular text-xs text-slate-400">{fmt(c.quantity)} {c.unit}</span></div>
+          <div className="flex items-center gap-2 text-sm"><TypeTag type={c.componentType} /><span className="text-xs tabular text-slate-400">{c.componentId}</span><span className="text-slate-700">{c.name}</span><span className="tabular text-xs text-slate-400">{fmt(c.quantity)} {c.unit}</span></div>
           {c.children && <BomTreeNode node={c.children} depth={depth + 2} />}
         </div>
       ))}
@@ -2253,7 +2531,7 @@ function WhereUsed({ productId, productType, products, store, jumpTo }) {
    TAB: Materials
    ============================================================================ */
 
-const EMPTY_MATERIAL_FORM = { materialId: '', name: '', type: 'RAW_MATERIAL', unit: '', price: '' };
+const EMPTY_MATERIAL_FORM = { materialId: '', name: '', type: 'RAW_MATERIAL', unit: '', price: '', purchaseUnit: '', conversionRate: '1', safetyStock: '', moq: '', maxStock: '', shelfLifeMonths: '', supplierName: '', note: '', active: true };
 
 function MaterialsTab({ store, refresh }) {
   const materials = store.materials;
@@ -2270,18 +2548,39 @@ function MaterialsTab({ store, refresh }) {
     if (!form.name.trim() || !form.unit.trim()) return;
     setFormError(null);
     try {
-      store.createMaterial({ materialId: form.materialId.trim() || undefined, name: form.name.trim(), type: form.type, unit: form.unit.trim(), price: form.price === '' ? 0 : Number(form.price) });
+      store.createMaterial({
+        materialId: form.materialId.trim() || undefined, name: form.name.trim(), type: form.type, unit: form.unit.trim(),
+        price: form.price === '' ? 0 : Number(form.price), purchaseUnit: form.purchaseUnit.trim() || form.unit.trim(),
+        conversionRate: form.conversionRate === '' ? 1 : Number(form.conversionRate), safetyStock: form.safetyStock === '' ? 0 : Number(form.safetyStock),
+        moq: form.moq, maxStock: form.maxStock, shelfLifeMonths: form.shelfLifeMonths,
+        supplierName: form.supplierName.trim() || null, note: form.note.trim() || null, active: form.active,
+      });
       setForm(EMPTY_MATERIAL_FORM); setAdding(false);
       refresh();
     } catch (e) { setFormError(e.message); }
   }
 
-  function startEdit(id, m) { setRowError(null); setEditingId(id); setEditError(null); setEditForm({ name: m.name, type: m.type, unit: m.unit, price: String(m.price) }); }
+  function startEdit(id, m) {
+    setRowError(null); setEditingId(id); setEditError(null);
+    setEditForm({
+      name: m.name, type: m.type, unit: m.unit, price: String(m.price),
+      purchaseUnit: m.purchaseUnit || m.unit, conversionRate: String(m.conversionRate ?? 1), safetyStock: String(m.safetyStock ?? 0),
+      moq: m.moq === null || m.moq === undefined ? '' : String(m.moq), maxStock: m.maxStock === null || m.maxStock === undefined ? '' : String(m.maxStock),
+      shelfLifeMonths: m.shelfLifeMonths === null || m.shelfLifeMonths === undefined ? '' : String(m.shelfLifeMonths),
+      supplierName: m.supplierName || '', note: m.note || '', active: m.active !== false,
+    });
+  }
 
   function submitEdit(id) {
     setEditError(null);
     try {
-      store.updateMaterial(id, { name: editForm.name.trim(), type: editForm.type, unit: editForm.unit.trim(), price: editForm.price === '' ? 0 : Number(editForm.price) });
+      store.updateMaterial(id, {
+        name: editForm.name.trim(), type: editForm.type, unit: editForm.unit.trim(), price: editForm.price === '' ? 0 : Number(editForm.price),
+        purchaseUnit: editForm.purchaseUnit.trim() || editForm.unit.trim(), conversionRate: editForm.conversionRate === '' ? 1 : Number(editForm.conversionRate),
+        safetyStock: editForm.safetyStock === '' ? 0 : Number(editForm.safetyStock),
+        moq: editForm.moq, maxStock: editForm.maxStock, shelfLifeMonths: editForm.shelfLifeMonths,
+        supplierName: editForm.supplierName.trim() || null, note: editForm.note.trim() || null, active: editForm.active,
+      });
       setEditingId(null); setEditForm(null);
       refresh();
     } catch (e) { setEditError(e.message); }
@@ -2315,10 +2614,23 @@ function MaterialsTab({ store, refresh }) {
                 <option value="RAW_MATERIAL">วัตถุดิบ</option><option value="PACKAGING">บรรจุภัณฑ์</option>
               </select>
             </div>
-            <div><label className="text-xs font-medium text-slate-500">หน่วย</label><input value={form.unit} onChange={(e) => setForm((f) => ({ ...f, unit: e.target.value }))} placeholder="kg, pcs, ลิตร..." className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+            <div><label className="text-xs font-medium text-slate-500">หน่วย (ใช้ใน BOM)</label><input value={form.unit} onChange={(e) => setForm((f) => ({ ...f, unit: e.target.value }))} placeholder="กรัม, ใบ..." className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
           </div>
           <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-5">
-            <div><label className="text-xs font-medium text-slate-500">ราคา/หน่วย</label><input type="number" value={form.price} onChange={(e) => setForm((f) => ({ ...f, price: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+            <div><label className="text-xs font-medium text-slate-500">ราคา/หน่วย(BOM)</label><input type="number" value={form.price} onChange={(e) => setForm((f) => ({ ...f, price: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+            <div><label className="text-xs font-medium text-slate-500">หน่วยที่ซื้อ</label><input value={form.purchaseUnit} onChange={(e) => setForm((f) => ({ ...f, purchaseUnit: e.target.value }))} placeholder="กระสอบ, ถุง, ลัง..." className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+            <div><label className="text-xs font-medium text-slate-500" title="1 หน่วยซื้อ เท่ากับกี่หน่วย BOM">อัตราแปลง (ต่อ 1 หน่วยซื้อ)</label><input type="number" value={form.conversionRate} onChange={(e) => setForm((f) => ({ ...f, conversionRate: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+            <div><label className="text-xs font-medium text-slate-500">Safety Stock</label><input type="number" value={form.safetyStock} onChange={(e) => setForm((f) => ({ ...f, safetyStock: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+            <div><label className="text-xs font-medium text-slate-500">MOQ (หน่วยซื้อ)</label><input type="number" value={form.moq} onChange={(e) => setForm((f) => ({ ...f, moq: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-5">
+            <div><label className="text-xs font-medium text-slate-500">Max Stock</label><input type="number" value={form.maxStock} onChange={(e) => setForm((f) => ({ ...f, maxStock: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+            <div><label className="text-xs font-medium text-slate-500">อายุสินค้า (เดือน)</label><input type="number" value={form.shelfLifeMonths} onChange={(e) => setForm((f) => ({ ...f, shelfLifeMonths: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+            <div className="col-span-2"><label className="text-xs font-medium text-slate-500">Supplier</label><input value={form.supplierName} onChange={(e) => setForm((f) => ({ ...f, supplierName: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+            <div className="flex items-end pb-1.5"><label className="flex items-center gap-1.5 text-xs font-medium text-slate-500"><input type="checkbox" checked={form.active} onChange={(e) => setForm((f) => ({ ...f, active: e.target.checked }))} className="h-3.5 w-3.5 rounded border-slate-300" /> ใช้งานอยู่</label></div>
+          </div>
+          <div className="mt-3 grid grid-cols-1">
+            <div><label className="text-xs font-medium text-slate-500">Note</label><input value={form.note} onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
           </div>
           {formError && <div className="mt-3 flex items-start gap-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700"><Icon name="alertTriangle" size={14} className="mt-0.5 shrink-0" /> {formError}</div>}
           <div className="mt-3 flex justify-end gap-2">
@@ -2329,7 +2641,7 @@ function MaterialsTab({ store, refresh }) {
       )}
       <div className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
-          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">รหัส</th><th className="px-4 py-3">รายการ</th><th className="px-4 py-3">ประเภท</th><th className="px-4 py-3">หน่วย</th><th className="px-4 py-3 text-right">ราคา/หน่วย</th><th className="px-4 py-3"></th></tr></thead>
+          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">รหัส</th><th className="px-4 py-3">รายการ</th><th className="px-4 py-3">ประเภท</th><th className="px-4 py-3">หน่วย BOM</th><th className="px-4 py-3">หน่วยซื้อ / อัตราแปลง</th><th className="px-4 py-3 text-right">ราคา/หน่วย</th><th className="px-4 py-3">สถานะ</th><th className="px-4 py-3"></th></tr></thead>
           <tbody>
             {filtered.map(([id, m]) => {
               const isEditing = editingId === id;
@@ -2337,30 +2649,55 @@ function MaterialsTab({ store, refresh }) {
                 <Fragment key={id}>
                   <tr className="border-b border-slate-50 last:border-0 align-top">
                     <td className="px-4 py-3 font-mono text-xs text-slate-500">{id}</td>
-                    {isEditing ? (
-                      <>
-                        <td className="px-4 py-2"><input value={editForm.name} onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))} className="w-full rounded-lg border border-slate-200 px-2 py-1 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></td>
-                        <td className="px-4 py-2"><select value={editForm.type} onChange={(e) => setEditForm((f) => ({ ...f, type: e.target.value }))} className="w-full rounded-lg border border-slate-200 px-2 py-1 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"><option value="RAW_MATERIAL">วัตถุดิบ</option><option value="PACKAGING">บรรจุภัณฑ์</option></select></td>
-                        <td className="px-4 py-2"><input value={editForm.unit} onChange={(e) => setEditForm((f) => ({ ...f, unit: e.target.value }))} className="w-full rounded-lg border border-slate-200 px-2 py-1 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></td>
-                        <td className="px-4 py-2"><input type="number" value={editForm.price} onChange={(e) => setEditForm((f) => ({ ...f, price: e.target.value }))} className="w-full rounded-lg border border-slate-200 px-2 py-1 text-right text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></td>
-                        <td className="px-4 py-2"><div className="flex items-center justify-end gap-1.5"><button onClick={() => submitEdit(id)} title="บันทึก" className="text-emerald-600 hover:text-emerald-700"><Icon name="check" size={16} /></button><button onClick={() => { setEditingId(null); setEditForm(null); setEditError(null); }} title="ยกเลิก" className="text-slate-400 hover:text-slate-600"><Icon name="x" size={16} /></button></div></td>
-                      </>
-                    ) : (
+                    {!isEditing && (
                       <>
                         <td className="px-4 py-3 font-medium text-slate-800">{m.name}</td>
                         <td className="px-4 py-3"><TypeTag type={m.type} /></td>
                         <td className="px-4 py-3 text-slate-500">{m.unit}</td>
+                        <td className="px-4 py-3 text-slate-500 tabular">{fmt(m.conversionRate ?? 1)} {m.unit} / {m.purchaseUnit || m.unit}</td>
                         <td className="px-4 py-3 text-right tabular text-slate-700">{fmt(m.price)}</td>
+                        <td className="px-4 py-3">{m.active === false ? <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500">ปิดใช้งาน</span> : <span className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">ใช้งาน</span>}</td>
                         <td className="px-4 py-3"><div className="flex items-center justify-end gap-2"><button onClick={() => startEdit(id, m)} title="แก้ไข" className="text-slate-400 hover:text-slate-600"><Icon name="pencil" size={14} /></button><button onClick={() => handleDelete(id)} title="ลบ" className="text-slate-300 hover:text-red-500"><Icon name="trash" size={14} /></button></div></td>
                       </>
                     )}
+                    {isEditing && (
+                      <td colSpan={7} className="px-4 py-3">
+                        <div className="rounded-lg border border-amber-200 bg-amber-50/40 p-3">
+                          <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+                            <div className="col-span-2"><label className="text-xs font-medium text-slate-500">รายการ</label><input value={editForm.name} onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+                            <div><label className="text-xs font-medium text-slate-500">ประเภท</label><select value={editForm.type} onChange={(e) => setEditForm((f) => ({ ...f, type: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"><option value="RAW_MATERIAL">วัตถุดิบ</option><option value="PACKAGING">บรรจุภัณฑ์</option></select></div>
+                            <div><label className="text-xs font-medium text-slate-500">หน่วย (BOM)</label><input value={editForm.unit} onChange={(e) => setEditForm((f) => ({ ...f, unit: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+                            <div><label className="text-xs font-medium text-slate-500">ราคา/หน่วย(BOM)</label><input type="number" value={editForm.price} onChange={(e) => setEditForm((f) => ({ ...f, price: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+                          </div>
+                          <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-5">
+                            <div><label className="text-xs font-medium text-slate-500">หน่วยที่ซื้อ</label><input value={editForm.purchaseUnit} onChange={(e) => setEditForm((f) => ({ ...f, purchaseUnit: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+                            <div><label className="text-xs font-medium text-slate-500" title="1 หน่วยซื้อ เท่ากับกี่หน่วย BOM">อัตราแปลง (ต่อ 1 หน่วยซื้อ)</label><input type="number" value={editForm.conversionRate} onChange={(e) => setEditForm((f) => ({ ...f, conversionRate: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+                            <div><label className="text-xs font-medium text-slate-500">Safety Stock</label><input type="number" value={editForm.safetyStock} onChange={(e) => setEditForm((f) => ({ ...f, safetyStock: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+                            <div><label className="text-xs font-medium text-slate-500">MOQ (หน่วยซื้อ)</label><input type="number" value={editForm.moq} onChange={(e) => setEditForm((f) => ({ ...f, moq: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+                            <div><label className="text-xs font-medium text-slate-500">Max Stock</label><input type="number" value={editForm.maxStock} onChange={(e) => setEditForm((f) => ({ ...f, maxStock: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+                          </div>
+                          <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-5">
+                            <div><label className="text-xs font-medium text-slate-500">อายุสินค้า (เดือน)</label><input type="number" value={editForm.shelfLifeMonths} onChange={(e) => setEditForm((f) => ({ ...f, shelfLifeMonths: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+                            <div className="col-span-2"><label className="text-xs font-medium text-slate-500">Supplier</label><input value={editForm.supplierName} onChange={(e) => setEditForm((f) => ({ ...f, supplierName: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+                            <div className="col-span-2 flex items-end pb-1.5"><label className="flex items-center gap-1.5 text-xs font-medium text-slate-500"><input type="checkbox" checked={editForm.active} onChange={(e) => setEditForm((f) => ({ ...f, active: e.target.checked }))} className="h-3.5 w-3.5 rounded border-slate-300" /> ใช้งานอยู่</label></div>
+                          </div>
+                          <div className="mt-3 grid grid-cols-1">
+                            <div><label className="text-xs font-medium text-slate-500">Note</label><input value={editForm.note} onChange={(e) => setEditForm((f) => ({ ...f, note: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+                          </div>
+                          {editError && <p className="mt-2 text-[11px] text-red-600">{editError}</p>}
+                          <div className="mt-3 flex justify-end gap-2">
+                            <button onClick={() => { setEditingId(null); setEditForm(null); setEditError(null); }} className="rounded-lg px-3 py-1.5 text-xs font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
+                            <button onClick={() => submitEdit(id)} className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700">บันทึก</button>
+                          </div>
+                        </div>
+                      </td>
+                    )}
                   </tr>
-                  {isEditing && editError && <tr className="border-b border-slate-50"><td colSpan={6} className="px-4 pb-2 pt-0"><p className="text-[11px] text-red-600">{editError}</p></td></tr>}
-                  {rowError?.id === id && <tr className="border-b border-slate-50"><td colSpan={6} className="px-4 pb-2 pt-0"><p className="text-[11px] text-red-600">{rowError.message}</p></td></tr>}
+                  {rowError?.id === id && <tr className="border-b border-slate-50"><td colSpan={8} className="px-4 pb-2 pt-0"><p className="text-[11px] text-red-600">{rowError.message}</p></td></tr>}
                 </Fragment>
               );
             })}
-            {filtered.length === 0 && <tr><td colSpan={6} className="px-4 py-6 text-center text-sm text-slate-400">ไม่พบรายการ</td></tr>}
+            {filtered.length === 0 && <tr><td colSpan={8} className="px-4 py-6 text-center text-sm text-slate-400">ไม่พบรายการ</td></tr>}
           </tbody>
         </table>
       </div>
