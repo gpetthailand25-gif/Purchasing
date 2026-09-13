@@ -167,22 +167,32 @@ function calculateMRP(forecastLines, asOfDate, repo) {
       ? (repo.getOpenProductionQty && repo.getOpenProductionQty(item.id)) || 0
       : (repo.getOpenPoQty && repo.getOpenPoQty(item.id)) || 0;
     const grossRequirement = item.totalQty;
+
+    // ยอดที่ต้องการจริง (ไม่รวม Safety Stock) — ใช้กำหนดปริมาณสั่งซื้อจริง
+    let netRequirementNoSafety = grossRequirement - stock - openQty - scheduledReceipt;
+    if (netRequirementNoSafety < 0) netRequirementNoSafety = 0;
+
+    // ยอดที่ต้องการรวม Safety Stock — ใช้แสดงข้อมูลประกอบเท่านั้น (ไม่ใช้กำหนดปริมาณสั่งซื้อ)
     let netRequirement = grossRequirement + safetyStock - stock - openQty - scheduledReceipt;
-    let status;
-    if (netRequirement < 0) {
-      netRequirement = 0;
-      status = isProduced ? 'Stock + Open Production เพียงพอ' : 'Stock + Open PO เพียงพอ';
-    } else {
-      status = isProduced ? 'ต้องผลิตเพิ่ม' : 'ต้องสั่งเพิ่ม';
-    }
+    if (netRequirement < 0) netRequirement = 0;
+
     const conversionRate = (repo.getConversionRate && repo.getConversionRate(item.id)) || 1;
-    const purchaseQtyNeeded = conversionRate > 0 ? Math.ceil(netRequirement / conversionRate) : null;
+    const moq = (repo.getMoq && repo.getMoq(item.id)) || 0;
+    let purchaseQtyNeeded = conversionRate > 0 ? Math.ceil(round3(netRequirementNoSafety) / conversionRate) : null;
+    if (purchaseQtyNeeded !== null && purchaseQtyNeeded > 0 && moq > 0 && purchaseQtyNeeded < moq) purchaseQtyNeeded = moq;
+
+    const needsAction = isProduced ? netRequirementNoSafety > 0 : (purchaseQtyNeeded !== null && purchaseQtyNeeded > 0);
+    const status = needsAction
+      ? (isProduced ? 'ต้องผลิตเพิ่ม' : 'ต้องสั่งเพิ่ม')
+      : (isProduced ? 'Stock + Open Production เพียงพอ' : 'Stock + Open PO เพียงพอ');
+
     const price = (repo.getMaterialPrice && repo.getMaterialPrice(item.id)) || 0;
-    const requirementValue = round2(netRequirement * price);
+    const requirementValue = round2(netRequirementNoSafety * price);
     results.push({
       type: item.type, id: item.id, unit: item.unit,
       grossRequirement: round3(grossRequirement), safetyStock, currentStock: stock, openQty, scheduledReceipt,
-      netRequirement: round3(netRequirement), purchaseQtyNeeded, requirementValue, status, breakdown: item.breakdown,
+      netRequirement: round3(netRequirement), netRequirementNoSafety: round3(netRequirementNoSafety),
+      purchaseQtyNeeded, requirementValue, status, needsAction, breakdown: item.breakdown,
     });
   }
   return results;
@@ -1015,19 +1025,32 @@ function createStore() {
         if (!bom || new Date(bom.effectiveDate) > new Date(asOfDate)) return null;
         return bom;
       },
-      getStock(type, id) { return stock[id] || 0; },
-      getSafetyStock(id) { return (materials[id] && materials[id].safetyStock) || 0; },
+      // stock/safetyStock/MOQ ของวัตถุดิบถูกกรอก/นำเข้าเป็น "หน่วยซื้อ" (เช่น ลัง/ถุง/กระสอบ) เหมือน price
+      // จึงต้องแปลงเป็น "หน่วยฐาน" ของ BOM (เช่น กรัม) ด้วย conversionRate ก่อนนำไปคำนวณร่วมกับ grossRequirement เสมอ
+      getStock(type, id) {
+        const raw = stock[id] || 0;
+        const rate = (materials[id] && materials[id].conversionRate) || 1;
+        return raw * rate;
+      },
+      getSafetyStock(id) {
+        const m = materials[id];
+        if (!m) return 0;
+        const rate = Number(m.conversionRate) || 1;
+        return (Number(m.safetyStock) || 0) * rate;
+      },
       getOpenPoQty(materialId) {
         let sum = 0;
         for (const po of purchaseOrders) {
           if (po.status === 'CANCELLED' || po.status === 'RECEIVED') continue;
           for (const line of po.lines) if (line.materialId === materialId) sum += line.orderedQty - line.receivedQty;
         }
-        return sum;
+        const rate = (materials[materialId] && materials[materialId].conversionRate) || 1;
+        return sum * rate;
       },
       getOpenProductionQty() { return 0; },
       getScheduledReceipt() { return 0; },
       getConversionRate(id) { return (materials[id] && materials[id].conversionRate) || 1; },
+      getMoq(id) { return (materials[id] && Number(materials[id].moq)) || 0; },
       getMaterialPrice(id) { return materialUnitCost(id); },
       getSemiFinishedChildren(productId) {
         const bom = boms[productId];
@@ -1476,7 +1499,7 @@ function createStore() {
   function getDashboardPurchasing(year, month, asOfDate, today = new Date()) {
     const mrp = calculateMrpForPeriodSafe(year, month, asOfDate);
     const allMrpItems = [...mrp.base, ...mrp.incremental];
-    const toOrder = allMrpItems.filter((r) => r.netRequirement > 0);
+    const toOrder = allMrpItems.filter((r) => r.needsAction);
     const pos = trackedPOs(today);
     const openPOs = pos.filter(isOpenPO);
     const openPoValue = openPOs.reduce((s, po) => s + po.lines.reduce((ls, l) => ls + poLineValue(l), 0), 0);
@@ -2248,14 +2271,14 @@ function MrpTab({ store, refresh }) {
   const kpis = useMemo(() => {
     if (!mrpResult) return null;
     const all = [...mrpResult.base, ...mrpResult.incremental];
-    const toOrder = all.filter((r) => r.netRequirement > 0);
+    const toOrder = all.filter((r) => r.needsAction);
     const value = toOrder.reduce((s, r) => s + r.requirementValue, 0);
     const risky = toOrder.filter((r) => {
       const a = actualPurchase[r.type + r.id];
       if (a === undefined || a === '') return false;
       const isMaterial = r.type === 'RAW_MATERIAL' || r.type === 'PACKAGING';
       const conversionRate = (isMaterial && materials[r.id]?.conversionRate) || 1;
-      return Number(a) * conversionRate < r.netRequirement;
+      return Number(a) * conversionRate < r.netRequirementNoSafety;
     });
     return { count: toOrder.length, value, risky: risky.length };
   }, [mrpResult, actualPurchase]);
@@ -2276,7 +2299,8 @@ function MrpTab({ store, refresh }) {
         'Stock': r.currentStock,
         'Open PO/Production': r.openQty,
         'Safety Stock': r.safetyStock,
-        'Net Requirement': r.netRequirement,
+        'Net Requirement (รวม Safety Stock)': r.netRequirement,
+        'Net Requirement (ไม่รวม Safety Stock)': r.netRequirementNoSafety,
         'ต้องซื้อ': isMaterial ? (r.purchaseQtyNeeded ?? '') : '',
         'หน่วยซื้อ': isMaterial ? purchaseUnit : '',
         'มูลค่า (บาท)': r.requirementValue,
@@ -2438,7 +2462,7 @@ function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actua
       <h3 className="text-sm font-semibold text-slate-700">{title}</h3>
       <div className="mt-2 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
-          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">Material</th><th className="px-4 py-3 text-right">Gross</th><th className="px-4 py-3 text-right">Stock</th><th className="px-4 py-3 text-right">Open PO</th><th className="px-4 py-3 text-right">Safety Stock</th><th className="px-4 py-3 text-right">Net Requirement</th><th className="px-4 py-3 text-right" title="ปริมาณที่ต้องสั่งซื้อ แปลงเป็นหน่วยที่ใช้สั่งซื้อจริง">ต้องซื้อ (หน่วยซื้อ)</th><th className="px-4 py-3 text-right">สั่งจริง</th><th className="px-4 py-3">สถานะ</th></tr></thead>
+          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">Material</th><th className="px-4 py-3 text-right">Gross</th><th className="px-4 py-3 text-right">Stock</th><th className="px-4 py-3 text-right">Open PO</th><th className="px-4 py-3 text-right" title="แสดงเป็นข้อมูลประกอบเท่านั้น ไม่ถูกใช้คำนวณปริมาณสั่งซื้อ">Safety Stock</th><th className="px-4 py-3 text-right" title="Gross + Safety Stock - Stock - Open PO (แสดงข้อมูลประกอบ)">Net Requirement</th><th className="px-4 py-3 text-right" title="ปริมาณที่ต้องสั่งซื้อจริง = Gross - Stock - Open PO (ไม่รวม Safety Stock) แปลงเป็นหน่วยซื้อ และปัดขึ้นตาม MOQ ของ Supplier">ต้องซื้อ (หน่วยซื้อ)</th><th className="px-4 py-3 text-right">สั่งจริง</th><th className="px-4 py-3">สถานะ</th></tr></thead>
           <tbody>
             {rows.map((r) => {
               const rowKey = keyPrefix + r.type + r.id;
@@ -2449,18 +2473,18 @@ function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actua
               const purchaseUnit = mat?.purchaseUnit || mat?.unit || r.unit;
               const conversionRate = (isMaterial && mat?.conversionRate) || 1;
               const actualInBaseUnit = actual !== undefined && actual !== '' ? Number(actual) * conversionRate : null;
-              const short = actualInBaseUnit !== null && actualInBaseUnit < r.netRequirement;
-              const actualPlaceholder = isMaterial ? (r.purchaseQtyNeeded ?? 0) : r.netRequirement;
+              const short = actualInBaseUnit !== null && actualInBaseUnit < r.netRequirementNoSafety;
+              const actualPlaceholder = isMaterial ? (r.purchaseQtyNeeded ?? 0) : r.netRequirementNoSafety;
               const ordered = orderedSoFar[r.type + r.id];
               return (
                 <Fragment key={rowKey}>
                   <tr className="cursor-pointer border-b border-slate-50 last:border-0 hover:bg-slate-50/60" onClick={() => setExpanded(isOpen ? null : rowKey)}>
                     <td className="px-4 py-3"><div className="flex items-center gap-1.5"><Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={14} className="text-slate-400" /><div><div className="font-medium text-slate-800">{nameOf(r.type, r.id)}</div><TypeTag type={r.type} /></div></div></td>
                     <td className="px-4 py-3 text-right tabular">{fmt(r.grossRequirement)} {r.unit}</td>
-                    <td className="px-4 py-3 text-right tabular text-slate-500">{fmt(r.currentStock)}</td>
-                    <td className="px-4 py-3 text-right tabular text-slate-500">{fmt(r.openQty)}</td>
-                    <td className="px-4 py-3 text-right tabular text-slate-500">{fmt(r.safetyStock)}</td>
-                    <td className="px-4 py-3 text-right tabular font-semibold text-slate-900">{fmt(r.netRequirement)}</td>
+                    <td className="px-4 py-3 text-right tabular text-slate-500">{fmt(r.currentStock)} {r.unit}</td>
+                    <td className="px-4 py-3 text-right tabular text-slate-500">{fmt(r.openQty)} {r.unit}</td>
+                    <td className="px-4 py-3 text-right tabular text-slate-500">{fmt(r.safetyStock)} {r.unit}</td>
+                    <td className="px-4 py-3 text-right tabular font-semibold text-slate-900">{fmt(r.netRequirement)} {r.unit}</td>
                     <td className="px-4 py-3 text-right tabular font-semibold text-amber-700">{isMaterial && r.purchaseQtyNeeded !== null && r.purchaseQtyNeeded !== undefined ? `${fmt(r.purchaseQtyNeeded)} ${purchaseUnit}` : '—'}</td>
                     <td className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
                       <div className="flex flex-col items-end gap-1">
@@ -2504,7 +2528,14 @@ function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actua
                         <ul className="space-y-1 text-xs text-slate-600">
                           {r.breakdown.map((b, i) => <li key={i} className="flex justify-between border-b border-dashed border-slate-100 py-1 tabular last:border-0"><span>{b.source.path.map((p) => nameOf('SEMI_FINISHED', p)).join(' → ')}</span><span className="font-medium">{fmt(b.qty)} {r.unit}</span></li>)}
                         </ul>
-                        {isMaterial && r.purchaseQtyNeeded > 0 && <p className="mt-2 text-xs text-slate-500">ต้องสั่งซื้อ ≈ <span className="font-semibold text-slate-800">{fmt(r.purchaseQtyNeeded)} {purchaseUnit}</span> (1 {purchaseUnit} = {fmt(mat?.conversionRate ?? 1)} {r.unit})</p>}
+                        {isMaterial && r.purchaseQtyNeeded > 0 && (
+                          <p className="mt-2 text-xs text-slate-500">
+                            ต้องสั่งซื้อ (ไม่รวม Safety Stock) ≈ <span className="font-semibold text-slate-800">{fmt(r.purchaseQtyNeeded)} {purchaseUnit}</span> (1 {purchaseUnit} = {fmt(mat?.conversionRate ?? 1)} {r.unit})
+                            {mat?.moq > 0 && r.purchaseQtyNeeded === mat.moq && round3(r.netRequirementNoSafety / (mat?.conversionRate || 1)) < mat.moq && (
+                              <span className="ml-1 text-slate-400">— ปัดขึ้นตาม MOQ ขั้นต่ำของ Supplier ({fmt(mat.moq)} {purchaseUnit})</span>
+                            )}
+                          </p>
+                        )}
                       </div>
                     </td></tr>
                   )}
