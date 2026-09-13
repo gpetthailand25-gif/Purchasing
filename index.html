@@ -1691,17 +1691,24 @@ async function loadSnapshotFromFirestore() {
 let __saveTimer = null;
 let __pendingSave = null;
 let __saveInFlight = false;
+function emitSaveStatus(status, message) {
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('app-save-status', { detail: { status, message, at: Date.now() } }));
+}
 function doSaveNow() {
   if (!__pendingSave) return;
   const fn = __pendingSave;
   __pendingSave = null;
   clearTimeout(__saveTimer);
   __saveInFlight = true;
-  fn().catch((e) => console.error('[persistence] บันทึกข้อมูลไม่สำเร็จ:', e)).finally(() => { __saveInFlight = false; });
+  emitSaveStatus('saving');
+  fn()
+    .then(() => emitSaveStatus('success'))
+    .catch((e) => { console.error('[persistence] บันทึกข้อมูลไม่สำเร็จ:', e); emitSaveStatus('error', e.message || String(e)); })
+    .finally(() => { __saveInFlight = false; });
 }
 function scheduleSave(store) {
   const db = window.__firestoreDb;
-  if (!db) return;
+  if (!db) { emitSaveStatus('error', 'ยังไม่ได้ตั้งค่า Firebase — ข้อมูลจะไม่ถูกบันทึกถาวร'); return; }
   clearTimeout(__saveTimer);
   __pendingSave = () => db.collection('app_state').doc('snapshot').set({ data: store.snapshot(), savedAt: new Date().toISOString() });
   __saveTimer = setTimeout(doSaveNow, 250);
@@ -2193,6 +2200,7 @@ function ForecastTab({ store, refresh }) {
             success++;
           } catch (err) { errors.push(`แถวที่ ${idx + 2}: ${err.message}`); }
         });
+        if (success > 0) doSaveNow();
         setImportResult({ success, errors });
         refresh();
       } catch (err) {
@@ -2235,6 +2243,7 @@ function ForecastTab({ store, refresh }) {
     const qty = Number(formQty);
     if (!qty || qty <= 0) return;
     store.upsertForecast({ year, month, productId: formProduct, quantity: qty, note: formNote, enteredBy: 'purchasing' });
+    doSaveNow();
     closeForm();
     refresh();
   }
@@ -2243,13 +2252,14 @@ function ForecastTab({ store, refresh }) {
     const qty = Number(adjQty);
     if (!qty || qty <= 0) return;
     store.addForecastAdjustment({ year, month, productId, additionalQty: qty, customerChannel: adjChannel, enteredBy: 'purchasing' });
+    doSaveNow();
     setAdjQty(''); setAdjChannel('');
     refresh();
   }
 
   function handleRemoveAdjustment(productId, index) {
     setRowError(null);
-    try { store.removeForecastAdjustment(year, month, productId, index); refresh(); }
+    try { store.removeForecastAdjustment(year, month, productId, index); doSaveNow(); refresh(); }
     catch (e) { setRowError({ id: productId, message: e.message }); }
   }
 
@@ -2258,6 +2268,7 @@ function ForecastTab({ store, refresh }) {
     if (!window.confirm(`ยืนยันลบ Forecast ของ "${name}" ประจำเดือนนี้? การลบนี้ย้อนกลับไม่ได้`)) return;
     try {
       store.deleteForecast(year, month, productId);
+      doSaveNow();
       if (editingEntryId === productId) closeForm();
       if (adjOpenFor === productId) setAdjOpenFor(null);
       refresh();
@@ -2266,7 +2277,7 @@ function ForecastTab({ store, refresh }) {
 
   function submitWeeklyActual(productId, week, value) {
     setRowError(null);
-    try { store.updateForecastWeeklyActual({ year, month, productId, week, actualQty: value }); refresh(); }
+    try { store.updateForecastWeeklyActual({ year, month, productId, week, actualQty: value }); doSaveNow(); refresh(); }
     catch (e) { setRowError({ id: productId, message: e.message }); }
   }
 
@@ -3991,6 +4002,30 @@ function LoadingScreen() {
   );
 }
 
+function SaveStatusToast() {
+  const [state, setState] = useState(null); // { status, message, at }
+  useEffect(() => {
+    let hideTimer = null;
+    function onStatus(e) {
+      setState(e.detail);
+      clearTimeout(hideTimer);
+      if (e.detail.status !== 'saving') {
+        hideTimer = setTimeout(() => setState(null), e.detail.status === 'error' ? 8000 : 2000);
+      }
+    }
+    window.addEventListener('app-save-status', onStatus);
+    return () => { window.removeEventListener('app-save-status', onStatus); clearTimeout(hideTimer); };
+  }, []);
+  if (!state) return null;
+  const style = state.status === 'error' ? 'bg-red-600 text-white' : state.status === 'saving' ? 'bg-slate-800 text-white' : 'bg-emerald-600 text-white';
+  const label = state.status === 'error' ? `บันทึกไม่สำเร็จ: ${state.message || ''}` : state.status === 'saving' ? 'กำลังบันทึก...' : 'บันทึกแล้ว';
+  return (
+    <div className={`fixed bottom-4 left-1/2 z-[100] -translate-x-1/2 rounded-full px-4 py-2 text-xs font-medium shadow-lg ${style}`}>
+      {label}
+    </div>
+  );
+}
+
 function App() {
   const storeRef = useRef(null);
   if (!storeRef.current) storeRef.current = createStore();
@@ -4036,6 +4071,7 @@ function App() {
           <ActiveComponent store={store} refresh={refresh} />
         </main>
       </div>
+      <SaveStatusToast />
     </div>
   );
 }
