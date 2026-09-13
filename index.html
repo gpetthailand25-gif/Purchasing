@@ -2462,7 +2462,7 @@ function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actua
       <h3 className="text-sm font-semibold text-slate-700">{title}</h3>
       <div className="mt-2 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
-          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">Material</th><th className="px-4 py-3 text-right">Gross</th><th className="px-4 py-3 text-right">Stock</th><th className="px-4 py-3 text-right">Open PO</th><th className="px-4 py-3 text-right" title="แสดงเป็นข้อมูลประกอบเท่านั้น ไม่ถูกใช้คำนวณปริมาณสั่งซื้อ">Safety Stock</th><th className="px-4 py-3 text-right" title="Gross + Safety Stock - Stock - Open PO (แสดงข้อมูลประกอบ)">Net Requirement</th><th className="px-4 py-3 text-right" title="ปริมาณที่ต้องสั่งซื้อจริง = Gross - Stock - Open PO (ไม่รวม Safety Stock) แปลงเป็นหน่วยซื้อ และปัดขึ้นตาม MOQ ของ Supplier">ต้องซื้อ (หน่วยซื้อ)</th><th className="px-4 py-3 text-right">สั่งจริง</th><th className="px-4 py-3">สถานะ</th></tr></thead>
+          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">Material</th><th className="px-4 py-3 text-right">Gross</th><th className="px-4 py-3 text-right">Stock</th><th className="px-4 py-3 text-right">Open PO</th><th className="px-4 py-3 text-right" title="แสดงเป็นข้อมูลประกอบเท่านั้น ไม่ถูกใช้คำนวณปริมาณสั่งซื้อ">MOQ Sup</th><th className="px-4 py-3 text-right" title="Gross + Safety Stock - Stock - Open PO (แสดงข้อมูลประกอบ)">Net Requirement</th><th className="px-4 py-3 text-right" title="ปริมาณที่ต้องสั่งซื้อจริง = Gross - Stock - Open PO (ไม่รวม Safety Stock) แปลงเป็นหน่วยซื้อ และปัดขึ้นตาม MOQ ของ Supplier">ต้องซื้อ (หน่วยซื้อ)</th><th className="px-4 py-3 text-right">สั่งจริง</th><th className="px-4 py-3">สถานะ</th></tr></thead>
           <tbody>
             {rows.map((r) => {
               const rowKey = keyPrefix + r.type + r.id;
@@ -2483,7 +2483,7 @@ function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actua
                     <td className="px-4 py-3 text-right tabular">{fmt(r.grossRequirement)} {r.unit}</td>
                     <td className="px-4 py-3 text-right tabular text-slate-500">{fmt(r.currentStock)} {r.unit}</td>
                     <td className="px-4 py-3 text-right tabular text-slate-500">{fmt(r.openQty)} {r.unit}</td>
-                    <td className="px-4 py-3 text-right tabular text-slate-500">{fmt(r.safetyStock)} {r.unit}</td>
+                    <td className="px-4 py-3 text-right tabular text-slate-500">{fmt(conversionRate > 0 ? round3(r.safetyStock / conversionRate) : r.safetyStock)} {purchaseUnit}</td>
                     <td className="px-4 py-3 text-right tabular font-semibold text-slate-900">{fmt(r.netRequirement)} {r.unit}</td>
                     <td className="px-4 py-3 text-right tabular font-semibold text-amber-700">{isMaterial && r.purchaseQtyNeeded !== null && r.purchaseQtyNeeded !== undefined ? `${fmt(r.purchaseQtyNeeded)} ${purchaseUnit}` : '—'}</td>
                     <td className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
