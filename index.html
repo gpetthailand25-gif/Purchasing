@@ -2557,7 +2557,7 @@ function MrpTab({ store, refresh }) {
       {summary && <MrpMonthSummary summary={summary} showDetail={showSummaryDetail} setShowDetail={setShowSummaryDetail} />}
       {mrpResult && (
         <>
-          <MrpTable title="MRP หลัก (จาก Forecast ประจำเดือน)" rows={mrpResult.base} nameOf={nameOf} materials={materials} expanded={expanded} setExpanded={setExpanded} actualPurchase={actualPurchase} setActualPurchase={setActualPurchase} onSave={saveActualOrder} savedRows={savedRows} orderedSoFar={orderedSoFar} />
+          <MrpTable title="MRP หลัก (จาก Forecast ประจำเดือน)" rows={mrpResult.base} nameOf={nameOf} materials={materials} expanded={expanded} setExpanded={setExpanded} actualPurchase={actualPurchase} setActualPurchase={setActualPurchase} onSave={saveActualOrder} savedRows={savedRows} orderedSoFar={orderedSoFar} incrementalByKey={Object.fromEntries(mrpResult.incremental.map((r) => [r.type + r.id, r.grossRequirement]))} />
           {mrpResult.incremental.length > 0 && <MrpTable title="MRP ส่วนเพิ่มระหว่างเดือน (Adjustment — แยกจากยอดหลัก ไม่ปนกัน)" rows={mrpResult.incremental} nameOf={nameOf} materials={materials} expanded={expanded} setExpanded={setExpanded} actualPurchase={actualPurchase} setActualPurchase={setActualPurchase} onSave={saveActualOrder} savedRows={savedRows} orderedSoFar={orderedSoFar} keyPrefix="inc-" />}
         </>
       )}
@@ -2625,13 +2625,13 @@ function MrpMonthSummary({ summary, showDetail, setShowDetail }) {
   );
 }
 
-function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actualPurchase, setActualPurchase, onSave, savedRows = {}, orderedSoFar = {}, keyPrefix = '' }) {
+function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actualPurchase, setActualPurchase, onSave, savedRows = {}, orderedSoFar = {}, keyPrefix = '', incrementalByKey = {} }) {
   return (
     <div className="mt-6">
       <h3 className="text-sm font-semibold text-slate-700">{title}</h3>
       <div className="mt-2 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
-          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">Material</th><th className="px-4 py-3 text-right">Gross</th><th className="px-4 py-3 text-right">Stock</th><th className="px-4 py-3 text-right">Open PO</th><th className="px-4 py-3 text-right" title="MOQ ขั้นต่ำของ Supplier (หน่วยซื้อ) — ใช้ปัดขึ้นปริมาณสั่งซื้อจริง">MOQ Sup</th><th className="px-4 py-3 text-right" title="Gross + Safety Stock - Stock - Open PO (แสดงข้อมูลประกอบ)">Net Requirement</th><th className="px-4 py-3 text-right" title="ปริมาณที่ต้องสั่งซื้อจริง = Gross - Stock - Open PO (ไม่รวม Safety Stock) แปลงเป็นหน่วยซื้อ และปัดขึ้นตาม MOQ ของ Supplier">ต้องซื้อ (หน่วยซื้อ)</th><th className="px-4 py-3 text-right">สั่งจริง</th><th className="px-4 py-3">สถานะ</th></tr></thead>
+          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">Material</th><th className="px-4 py-3 text-right" title="ยอด Gross จาก Forecast — ถ้ามีส่วนเพิ่มระหว่างเดือน จะแสดงยอดเปรียบเทียบ Forecast เดิม + สั่งเพิ่ม ใต้ตัวเลข">Gross</th><th className="px-4 py-3 text-right">Stock</th><th className="px-4 py-3 text-right">Open PO</th><th className="px-4 py-3 text-right" title="MOQ ขั้นต่ำของ Supplier (หน่วยซื้อ) — ใช้ปัดขึ้นปริมาณสั่งซื้อจริง">MOQ Sup</th><th className="px-4 py-3 text-right" title="Gross + Safety Stock - Stock - Open PO (แสดงข้อมูลประกอบ)">Net Requirement</th><th className="px-4 py-3 text-right" title="ปริมาณที่ต้องสั่งซื้อจริง = Gross - Stock - Open PO (ไม่รวม Safety Stock) แปลงเป็นหน่วยซื้อ และปัดขึ้นตาม MOQ ของ Supplier">ต้องซื้อ (หน่วยซื้อ)</th><th className="px-4 py-3 text-right">สั่งจริง</th><th className="px-4 py-3">สถานะ</th></tr></thead>
           <tbody>
             {rows.map((r) => {
               const rowKey = keyPrefix + r.type + r.id;
@@ -2649,7 +2649,12 @@ function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actua
                 <Fragment key={rowKey}>
                   <tr className="cursor-pointer border-b border-slate-50 last:border-0 hover:bg-slate-50/60" onClick={() => setExpanded(isOpen ? null : rowKey)}>
                     <td className="px-4 py-3"><div className="flex items-center gap-1.5"><Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={14} className="text-slate-400" /><div><div className="font-medium text-slate-800">{nameOf(r.type, r.id)}</div><TypeTag type={r.type} /></div></div></td>
-                    <td className="px-4 py-3 text-right tabular">{fmt(r.grossRequirement)} {r.unit}</td>
+                    <td className="px-4 py-3 text-right tabular">
+                      <div>{fmt(r.grossRequirement)} {r.unit}</div>
+                      {incrementalByKey[r.type + r.id] > 0 && (
+                        <div className="text-[11px] font-medium text-emerald-600">Forecast {fmt(r.grossRequirement)} + สั่งเพิ่ม {fmt(incrementalByKey[r.type + r.id])} = <span className="font-semibold">{fmt(r.grossRequirement + incrementalByKey[r.type + r.id])} {r.unit}</span></div>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-right tabular text-slate-500">{fmt(r.currentStock)} {r.unit}</td>
                     <td className="px-4 py-3 text-right tabular text-slate-500">{fmt(r.openQty)} {r.unit}</td>
                     <td className="px-4 py-3 text-right tabular text-slate-500">{isMaterial ? (mat?.moq ? `${fmt(mat.moq)} ${purchaseUnit}` : '—') : `${fmt(r.safetyStock)} ${r.unit}`}</td>
