@@ -1689,17 +1689,24 @@ async function loadSnapshotFromFirestore() {
 }
 
 let __saveTimer = null;
+let __pendingSave = null;
+function doSaveNow() {
+  if (!__pendingSave) return;
+  const fn = __pendingSave;
+  __pendingSave = null;
+  clearTimeout(__saveTimer);
+  fn().catch((e) => console.error('[persistence] บันทึกข้อมูลไม่สำเร็จ:', e));
+}
 function scheduleSave(store) {
   const db = window.__firestoreDb;
   if (!db) return;
   clearTimeout(__saveTimer);
-  __saveTimer = setTimeout(async () => {
-    try {
-      await db.collection('app_state').doc('snapshot').set({ data: store.snapshot(), savedAt: new Date().toISOString() });
-    } catch (e) {
-      console.error('[persistence] บันทึกข้อมูลไม่สำเร็จ:', e);
-    }
-  }, 1200);
+  __pendingSave = () => db.collection('app_state').doc('snapshot').set({ data: store.snapshot(), savedAt: new Date().toISOString() });
+  __saveTimer = setTimeout(doSaveNow, 500);
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', doSaveNow);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') doSaveNow(); });
 }
 
 /* ============================================================================
