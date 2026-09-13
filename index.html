@@ -2257,14 +2257,19 @@ function ForecastTab({ store, refresh }) {
       )}
       <div className="mt-6 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
-          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-5 py-3">Product</th><th className="px-5 py-3 text-right">Forecast ปัจจุบัน</th><th className="px-5 py-3 text-right">เดิม</th><th className="px-5 py-3 text-right">เพิ่มระหว่างเดือน</th><th className="px-5 py-3">Version</th><th className="px-5 py-3"></th></tr></thead>
+          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-5 py-3">Product</th><th className="px-5 py-3 text-right">Forecast ปัจจุบัน</th><th className="px-5 py-3 text-right">เดิม</th><th className="px-5 py-3 text-right">เพิ่มระหว่างเดือน</th><th className="px-5 py-3 text-right" title="ยอดขายจริงสะสม ÷ Forecast ปัจจุบัน">% ขายจริง</th><th className="px-5 py-3">Version</th><th className="px-5 py-3"></th></tr></thead>
           <tbody>
-            {entries.length === 0 && <tr><td colSpan={6} className="px-5 py-8 text-center text-sm text-slate-400">ยังไม่มี Forecast ของเดือนนี้</td></tr>}
+            {entries.length === 0 && <tr><td colSpan={7} className="px-5 py-8 text-center text-sm text-slate-400">ยังไม่มี Forecast ของเดือนนี้</td></tr>}
             {entries.map((entry) => {
               const revisions = entry.revisions;
               const cur = revisions[revisions.length - 1].quantity;
               const prev = revisions.length > 1 ? revisions[revisions.length - 2].quantity : null;
               const adjTotal = entry.adjustments.reduce((s, a) => s + a.additionalQty, 0);
+              const weeklyActual = entry.weeklyActual || {};
+              const soldTotal = Object.values(weeklyActual).reduce((s, v) => s + (Number(v) || 0), 0);
+              const remaining = cur - soldTotal;
+              const soldPct = cur > 0 ? Math.round((soldTotal / cur) * 100) : 0;
+              const overage = remaining < 0 ? Math.abs(remaining) : 0;
               return (
                 <Fragment key={entry.productId}>
                   <tr className="border-b border-slate-50 last:border-0">
@@ -2272,6 +2277,11 @@ function ForecastTab({ store, refresh }) {
                     <td className="px-5 py-4 text-right tabular font-medium">{fmt(cur)}</td>
                     <td className="px-5 py-4 text-right tabular text-slate-400">{prev !== null ? fmt(prev) : '—'}</td>
                     <td className="px-5 py-4 text-right tabular text-emerald-600">{adjTotal > 0 ? `+${fmt(adjTotal)}` : '—'}</td>
+                    <td className="px-5 py-4 text-right tabular">
+                      {soldTotal > 0 ? (
+                        <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold ${soldPct > 100 ? 'bg-red-100 text-red-700' : soldPct >= 80 ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}`}>{soldPct > 100 && <Icon name="alertTriangle" size={11} />}{soldPct}%</span>
+                      ) : <span className="text-slate-300">—</span>}
+                    </td>
                     <td className="px-5 py-4"><span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500"><Icon name="history" size={11} /> v{revisions.length}</span></td>
                     <td className="px-5 py-4"><div className="flex items-center justify-end gap-3">
                       <button onClick={() => setWeeklyOpenFor(weeklyOpenFor === entry.productId ? null : entry.productId)} className="inline-flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-800"><Icon name="clock" size={13} /> ยอดขายรายสัปดาห์</button>
@@ -2280,33 +2290,34 @@ function ForecastTab({ store, refresh }) {
                       <button onClick={() => handleDeleteForecast(entry.productId, products[entry.productId]?.name)} title="ลบ Forecast" className="text-slate-300 hover:text-red-500"><Icon name="trash" size={14} /></button>
                     </div></td>
                   </tr>
-                  {rowError?.id === entry.productId && <tr><td colSpan={6} className="px-5 pb-2 pt-0"><p className="text-[11px] text-red-600">{rowError.message}</p></td></tr>}
-                  {weeklyOpenFor === entry.productId && (() => {
-                    const weeklyActual = entry.weeklyActual || {};
-                    const soldTotal = Object.values(weeklyActual).reduce((s, v) => s + (Number(v) || 0), 0);
-                    const remaining = cur - soldTotal;
-                    const pct = cur > 0 ? Math.round((soldTotal / cur) * 100) : 0;
-                    return (
-                      <tr className="bg-slate-50/60"><td colSpan={6} className="px-5 py-4">
-                        <p className="mb-2 text-xs font-medium text-slate-500">อัพเดตยอดขายจริงรายสัปดาห์ (เทียบกับ Forecast {fmt(cur)} {unitOf(entry.productId)})</p>
-                        <div className="flex flex-wrap items-end gap-3">
-                          {Array.from({ length: weeksInMonth }, (_, i) => i + 1).map((w) => (
-                            <div key={w}>
-                              <label className="text-xs font-medium text-slate-500">สัปดาห์ที่ {w}</label>
-                              <input type="number" defaultValue={weeklyActual[w] ?? ''} onBlur={(e) => submitWeeklyActual(entry.productId, w, e.target.value)} placeholder="0" className="mt-1 block w-24 rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
-                            </div>
-                          ))}
+                  {rowError?.id === entry.productId && <tr><td colSpan={7} className="px-5 pb-2 pt-0"><p className="text-[11px] text-red-600">{rowError.message}</p></td></tr>}
+                  {weeklyOpenFor === entry.productId && (
+                    <tr className="bg-slate-50/60"><td colSpan={7} className="px-5 py-4">
+                      <p className="mb-2 text-xs font-medium text-slate-500">อัพเดตยอดขายจริงรายสัปดาห์ (เทียบกับ Forecast {fmt(cur)} {unitOf(entry.productId)})</p>
+                      <div className="flex flex-wrap items-end gap-3">
+                        {Array.from({ length: weeksInMonth }, (_, i) => i + 1).map((w) => (
+                          <div key={w}>
+                            <label className="text-xs font-medium text-slate-500">สัปดาห์ที่ {w}</label>
+                            <input type="number" defaultValue={weeklyActual[w] ?? ''} onBlur={(e) => submitWeeklyActual(entry.productId, w, e.target.value)} placeholder="0" className="mt-1 block w-24 rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
+                          </div>
+                        ))}
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-4 text-xs text-slate-600">
+                        <span>ขายแล้วรวม: <span className="font-semibold tabular text-slate-900">{fmt(soldTotal)}</span> {unitOf(entry.productId)}</span>
+                        <span>คงเหลือจาก Forecast: <span className={`font-semibold tabular ${remaining < 0 ? 'text-red-600' : 'text-slate-900'}`}>{fmt(remaining)}</span> {unitOf(entry.productId)}</span>
+                        <span>สัดส่วนที่ขายได้: <span className="font-semibold tabular text-slate-900">{soldPct}%</span></span>
+                      </div>
+                      {overage > 0 && (
+                        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                          <Icon name="alertTriangle" size={14} />
+                          <span>ขายเกิน Forecast ไปแล้ว {fmt(overage)} {unitOf(entry.productId)} — วัตถุดิบที่เผื่อไว้อาจไม่พอ ต้องพิจารณาสั่งเพิ่มใน MRP</span>
+                          <button onClick={() => { setAdjQty(String(overage)); setAdjChannel('ยอดขายเกิน Forecast'); setAdjOpenFor(entry.productId); setWeeklyOpenFor(null); }} className="ml-auto shrink-0 rounded-lg bg-red-600 px-2.5 py-1 font-medium text-white hover:bg-red-700">เพิ่มส่วนเกินเข้า MRP</button>
                         </div>
-                        <div className="mt-3 flex flex-wrap gap-4 text-xs text-slate-600">
-                          <span>ขายแล้วรวม: <span className="font-semibold tabular text-slate-900">{fmt(soldTotal)}</span> {unitOf(entry.productId)}</span>
-                          <span>คงเหลือจาก Forecast: <span className={`font-semibold tabular ${remaining < 0 ? 'text-red-600' : 'text-slate-900'}`}>{fmt(remaining)}</span> {unitOf(entry.productId)}</span>
-                          <span>สัดส่วนที่ขายได้: <span className="font-semibold tabular text-slate-900">{pct}%</span></span>
-                        </div>
-                      </td></tr>
-                    );
-                  })()}
+                      )}
+                    </td></tr>
+                  )}
                   {adjOpenFor === entry.productId && (
-                    <tr className="bg-amber-50/40"><td colSpan={6} className="px-5 py-4">
+                    <tr className="bg-amber-50/40"><td colSpan={7} className="px-5 py-4">
                       {entry.adjustments.length > 0 && (
                         <div className="mb-3 space-y-1.5">
                           {entry.adjustments.map((a, i) => (
