@@ -1156,12 +1156,22 @@ function createStore() {
     const key = forecastKey(year, month, productId);
     const existing = forecasts.get(key);
     if (!existing) {
-      forecasts.set(key, { year, month, productId, quantity, revisions: [{ versionNo: 1, quantity, revisedBy: enteredBy, note, revisedDate: new Date().toISOString() }], adjustments: [] });
+      forecasts.set(key, { year, month, productId, quantity, revisions: [{ versionNo: 1, quantity, revisedBy: enteredBy, note, revisedDate: new Date().toISOString() }], adjustments: [], weeklyActual: {} });
       return forecasts.get(key);
     }
     const versionNo = existing.revisions.length + 1;
     existing.revisions.push({ versionNo, quantity, revisedBy: enteredBy, note, revisedDate: new Date().toISOString() });
     existing.quantity = quantity;
+    return existing;
+  }
+
+  function updateForecastWeeklyActual({ year, month, productId, week, actualQty }) {
+    const key = forecastKey(year, month, productId);
+    const existing = forecasts.get(key);
+    if (!existing) throw new HttpError(404, 'ไม่พบ Forecast รายการนี้ กรุณากรอก Forecast ก่อน');
+    if (!existing.weeklyActual) existing.weeklyActual = {};
+    if (actualQty === '' || actualQty === null || actualQty === undefined) delete existing.weeklyActual[week];
+    else existing.weeklyActual[week] = Number(actualQty) || 0;
     return existing;
   }
 
@@ -1635,7 +1645,7 @@ function createStore() {
   return {
     products, materials, suppliers, stock, boms,
     createProduct, updateProduct, deleteProduct, createMaterial, updateMaterial, deleteMaterial,
-    upsertForecast, addForecastAdjustment, listForecast, deleteForecast, removeForecastAdjustment, calculateMrpForPeriod,
+    upsertForecast, addForecastAdjustment, listForecast, deleteForecast, removeForecastAdjustment, updateForecastWeeklyActual, calculateMrpForPeriod,
     getBomTree, whereUsed, addBomDetail, removeBomDetail, updateBomDetail, updateBomHeader,
     createPurchaseOrder, getPurchaseOrder, listPurchaseOrdersTracking, receiveGoods, updatePurchaseOrder, deletePurchaseOrder,
     logActualOrder, listActualOrderLogs, updateActualOrderLog, deleteActualOrderLog, linkActualOrderToPo,
@@ -1646,7 +1656,7 @@ function createStore() {
   };
 }
 
-const MUTATORS = ['createProduct', 'updateProduct', 'deleteProduct', 'createMaterial', 'updateMaterial', 'deleteMaterial', 'addBomDetail', 'removeBomDetail', 'updateBomDetail', 'updateBomHeader', 'upsertForecast', 'addForecastAdjustment', 'deleteForecast', 'removeForecastAdjustment', 'createPurchaseOrder', 'receiveGoods', 'updatePurchaseOrder', 'deletePurchaseOrder', 'logActualOrder', 'updateActualOrderLog', 'deleteActualOrderLog', 'linkActualOrderToPo', 'importStock'];
+const MUTATORS = ['createProduct', 'updateProduct', 'deleteProduct', 'createMaterial', 'updateMaterial', 'deleteMaterial', 'addBomDetail', 'removeBomDetail', 'updateBomDetail', 'updateBomHeader', 'upsertForecast', 'addForecastAdjustment', 'deleteForecast', 'removeForecastAdjustment', 'updateForecastWeeklyActual', 'createPurchaseOrder', 'receiveGoods', 'updatePurchaseOrder', 'deletePurchaseOrder', 'logActualOrder', 'updateActualOrderLog', 'deleteActualOrderLog', 'linkActualOrderToPo', 'importStock'];
 
 /* ============================================================================
    PERSISTENCE — Firestore (client-side, ดู FIREBASE_CONFIG ด้านบนสุดของไฟล์)
@@ -2066,6 +2076,10 @@ function ForecastTab({ store, refresh }) {
   const [adjQty, setAdjQty] = useState('');
   const [adjChannel, setAdjChannel] = useState('');
   const [rowError, setRowError] = useState(null);
+  const [weeklyOpenFor, setWeeklyOpenFor] = useState(null);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importResult, setImportResult] = useState(null);
+  const fileInputRef = useRef(null);
 
   const products = store.products;
   const boms = store.boms;
@@ -2073,8 +2087,63 @@ function ForecastTab({ store, refresh }) {
   const finishedProducts = Object.entries(products).filter(([, p]) => p.type === 'FINISHED');
   const productOptions = finishedProducts.map(([id, p]) => [id, `${id} — ${p.name}`]);
   function unitOf(productId) { return boms[productId]?.batchYieldUnit || '—'; }
+  const weeksInMonth = Math.ceil(new Date(year, month, 0).getDate() / 7);
 
   useEffect(() => { if (!formProduct && finishedProducts.length) setFormProduct(finishedProducts[0][0]); }, [products]);
+
+  function downloadTemplate() {
+    if (!window.XLSX) { window.alert('ไม่สามารถโหลดไลบรารี Excel ได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต'); return; }
+    const sample = finishedProducts.slice(0, 1).map(([id, p]) => ({ 'รหัสสินค้า': id, 'ชื่อสินค้า': p.name, 'จำนวน': '', 'หน่วย': unitOf(id) }));
+    const rows = sample.length ? sample : [{ 'รหัสสินค้า': '', 'ชื่อสินค้า': '', 'จำนวน': '', 'หน่วย': '' }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Forecast Template');
+    XLSX.writeFile(wb, `Forecast_Template_${year}-${String(month).padStart(2, '0')}.xlsx`);
+  }
+
+  function handleForecastFile(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setImportBusy(true);
+    setImportResult(null);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = new Uint8Array(ev.target.result);
+        const wb = XLSX.read(data, { type: 'array' });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+        let success = 0; const errors = [];
+        rows.forEach((row, idx) => {
+          const code = String(row['รหัสสินค้า'] ?? row['ProductID'] ?? row['รหัส'] ?? '').trim();
+          const nameInFile = String(row['ชื่อสินค้า'] ?? row['Product'] ?? '').trim();
+          let qtyRaw = row['จำนวน'] ?? row['Quantity'] ?? '';
+          if (typeof qtyRaw === 'string') qtyRaw = qtyRaw.replace(/,/g, '').trim();
+          const qty = Number(qtyRaw);
+          if (!code && !nameInFile) return;
+          let productId = code && products[code] ? code : null;
+          if (!productId && nameInFile) {
+            const match = finishedProducts.find(([, p]) => p.name === nameInFile);
+            if (match) productId = match[0];
+          }
+          if (!productId) { errors.push(`แถวที่ ${idx + 2}: ไม่พบสินค้ารหัส "${code || nameInFile}"`); return; }
+          if (!qty || qty <= 0) { errors.push(`แถวที่ ${idx + 2}: จำนวนไม่ถูกต้อง`); return; }
+          try {
+            store.upsertForecast({ year, month, productId, quantity: qty, enteredBy: 'purchasing (import)', note: 'นำเข้าจาก Excel' });
+            success++;
+          } catch (err) { errors.push(`แถวที่ ${idx + 2}: ${err.message}`); }
+        });
+        setImportResult({ success, errors });
+        refresh();
+      } catch (err) {
+        setImportResult({ success: 0, errors: [err.message || 'ไม่สามารถอ่านไฟล์ได้'] });
+      } finally {
+        setImportBusy(false);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      }
+    };
+    reader.onerror = () => { setImportBusy(false); setImportResult({ success: 0, errors: ['ไม่สามารถอ่านไฟล์ได้'] }); };
+    reader.readAsArrayBuffer(file);
+  }
 
   function openAddForm() {
     setEditingEntryId(null);
@@ -2134,13 +2203,31 @@ function ForecastTab({ store, refresh }) {
     } catch (e) { setRowError({ id: productId, message: e.message }); }
   }
 
+  function submitWeeklyActual(productId, week, value) {
+    setRowError(null);
+    try { store.updateForecastWeeklyActual({ year, month, productId, week, actualQty: value }); refresh(); }
+    catch (e) { setRowError({ id: productId, message: e.message }); }
+  }
+
   return (
     <div>
       <PageHeader title="Forecast ประจำเดือน" year={year} month={month} onYear={setYear} onMonth={setMonth} />
       <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-slate-500">ระบบเก็บ Version ทุกครั้งที่แก้ไข Forecast ไม่ทับของเดิม</p>
-        <button onClick={openAddForm} className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-2 text-sm font-medium text-white transition hover:bg-slate-700"><Icon name="plus" size={16} /> เพิ่ม Forecast</button>
+        <div className="flex flex-wrap items-center gap-2">
+          <input ref={fileInputRef} type="file" accept=".csv,.xlsx,.xls" onChange={handleForecastFile} className="hidden" id="forecast-upload-input" />
+          <button onClick={downloadTemplate} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"><Icon name="download" size={14} /> ดาวน์โหลด Template</button>
+          <button onClick={() => fileInputRef.current && fileInputRef.current.click()} disabled={importBusy} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"><Icon name="upload" size={14} /> {importBusy ? 'กำลังนำเข้า...' : 'อัพโหลด Excel'}</button>
+          <button onClick={openAddForm} className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-2 text-sm font-medium text-white transition hover:bg-slate-700"><Icon name="plus" size={16} /> เพิ่ม Forecast</button>
+        </div>
       </div>
+      {importResult && (
+        <div className={`mt-3 rounded-lg border px-4 py-3 text-xs ${importResult.errors.length ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-emerald-200 bg-emerald-50 text-emerald-800'}`}>
+          <p className="font-medium">นำเข้าสำเร็จ {importResult.success} รายการ{importResult.errors.length ? ` · ผิดพลาด ${importResult.errors.length} รายการ` : ''}</p>
+          {importResult.errors.length > 0 && <ul className="mt-1 list-disc space-y-0.5 pl-4">{importResult.errors.slice(0, 10).map((msg, i) => <li key={i}>{msg}</li>)}</ul>}
+          <button onClick={() => setImportResult(null)} className="mt-1.5 text-slate-500 underline">ปิด</button>
+        </div>
+      )}
       {formOpen && (
         <div className="mt-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
           {editingEntryId && <p className="mb-3 text-xs font-medium text-amber-700">กำลังแก้ไข Forecast ของ {products[editingEntryId]?.name}</p>}
@@ -2187,12 +2274,37 @@ function ForecastTab({ store, refresh }) {
                     <td className="px-5 py-4 text-right tabular text-emerald-600">{adjTotal > 0 ? `+${fmt(adjTotal)}` : '—'}</td>
                     <td className="px-5 py-4"><span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500"><Icon name="history" size={11} /> v{revisions.length}</span></td>
                     <td className="px-5 py-4"><div className="flex items-center justify-end gap-3">
+                      <button onClick={() => setWeeklyOpenFor(weeklyOpenFor === entry.productId ? null : entry.productId)} className="inline-flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-800"><Icon name="clock" size={13} /> ยอดขายรายสัปดาห์</button>
                       <button onClick={() => setAdjOpenFor(adjOpenFor === entry.productId ? null : entry.productId)} className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 hover:text-amber-800"><Icon name="packagePlus" size={13} /> เพิ่มระหว่างเดือน</button>
                       <button onClick={() => openEditForm(entry)} title="แก้ไข Forecast" className="text-slate-400 hover:text-slate-600"><Icon name="pencil" size={14} /></button>
                       <button onClick={() => handleDeleteForecast(entry.productId, products[entry.productId]?.name)} title="ลบ Forecast" className="text-slate-300 hover:text-red-500"><Icon name="trash" size={14} /></button>
                     </div></td>
                   </tr>
                   {rowError?.id === entry.productId && <tr><td colSpan={6} className="px-5 pb-2 pt-0"><p className="text-[11px] text-red-600">{rowError.message}</p></td></tr>}
+                  {weeklyOpenFor === entry.productId && (() => {
+                    const weeklyActual = entry.weeklyActual || {};
+                    const soldTotal = Object.values(weeklyActual).reduce((s, v) => s + (Number(v) || 0), 0);
+                    const remaining = cur - soldTotal;
+                    const pct = cur > 0 ? Math.round((soldTotal / cur) * 100) : 0;
+                    return (
+                      <tr className="bg-slate-50/60"><td colSpan={6} className="px-5 py-4">
+                        <p className="mb-2 text-xs font-medium text-slate-500">อัพเดตยอดขายจริงรายสัปดาห์ (เทียบกับ Forecast {fmt(cur)} {unitOf(entry.productId)})</p>
+                        <div className="flex flex-wrap items-end gap-3">
+                          {Array.from({ length: weeksInMonth }, (_, i) => i + 1).map((w) => (
+                            <div key={w}>
+                              <label className="text-xs font-medium text-slate-500">สัปดาห์ที่ {w}</label>
+                              <input type="number" defaultValue={weeklyActual[w] ?? ''} onBlur={(e) => submitWeeklyActual(entry.productId, w, e.target.value)} placeholder="0" className="mt-1 block w-24 rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
+                            </div>
+                          ))}
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-4 text-xs text-slate-600">
+                          <span>ขายแล้วรวม: <span className="font-semibold tabular text-slate-900">{fmt(soldTotal)}</span> {unitOf(entry.productId)}</span>
+                          <span>คงเหลือจาก Forecast: <span className={`font-semibold tabular ${remaining < 0 ? 'text-red-600' : 'text-slate-900'}`}>{fmt(remaining)}</span> {unitOf(entry.productId)}</span>
+                          <span>สัดส่วนที่ขายได้: <span className="font-semibold tabular text-slate-900">{pct}%</span></span>
+                        </div>
+                      </td></tr>
+                    );
+                  })()}
                   {adjOpenFor === entry.productId && (
                     <tr className="bg-amber-50/40"><td colSpan={6} className="px-5 py-4">
                       {entry.adjustments.length > 0 && (
