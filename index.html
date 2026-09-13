@@ -1690,23 +1690,35 @@ async function loadSnapshotFromFirestore() {
 
 let __saveTimer = null;
 let __pendingSave = null;
+let __saveInFlight = false;
 function doSaveNow() {
   if (!__pendingSave) return;
   const fn = __pendingSave;
   __pendingSave = null;
   clearTimeout(__saveTimer);
-  fn().catch((e) => console.error('[persistence] บันทึกข้อมูลไม่สำเร็จ:', e));
+  __saveInFlight = true;
+  fn().catch((e) => console.error('[persistence] บันทึกข้อมูลไม่สำเร็จ:', e)).finally(() => { __saveInFlight = false; });
 }
 function scheduleSave(store) {
   const db = window.__firestoreDb;
   if (!db) return;
   clearTimeout(__saveTimer);
   __pendingSave = () => db.collection('app_state').doc('snapshot').set({ data: store.snapshot(), savedAt: new Date().toISOString() });
-  __saveTimer = setTimeout(doSaveNow, 500);
+  __saveTimer = setTimeout(doSaveNow, 250);
 }
 if (typeof window !== 'undefined') {
-  window.addEventListener('beforeunload', doSaveNow);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') doSaveNow(); });
+  window.addEventListener('beforeunload', (e) => {
+    // ถ้ามีการแก้ไขที่ยังไม่ถูกส่งขึ้น Firebase (หรือกำลังส่งอยู่) ให้เบราว์เซอร์เด้งถามยืนยันก่อนออกจากหน้า
+    // เพื่อหน่วงเวลาให้การบันทึกที่ค้างอยู่มีโอกาสส่งสำเร็จก่อนหน้าเว็บจะปิด/รีเฟรชจริง
+    const hadPending = !!__pendingSave;
+    doSaveNow();
+    if (hadPending || __saveInFlight) {
+      e.preventDefault();
+      e.returnValue = 'มีข้อมูลที่กำลังบันทึกอยู่ ต้องการออกจากหน้านี้เลยหรือไม่?';
+      return e.returnValue;
+    }
+  });
 }
 
 /* ============================================================================
