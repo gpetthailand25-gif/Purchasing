@@ -2719,10 +2719,47 @@ function BomTab({ store, refresh }) {
     .filter(([id, p]) => search === '' || p.name.includes(search) || id.toUpperCase().includes(search.toUpperCase()))
     .sort(([idA], [idB]) => idA.localeCompare(idB));
 
+  function exportAllBoms() {
+    if (!window.XLSX) { window.alert('ไม่สามารถโหลดไลบรารี Excel ได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต'); return; }
+    const rows = [];
+    Object.entries(products).forEach(([pid, p]) => {
+      const t = store.getBomTree(pid, TODAY);
+      if (!t || t.components.length === 0) return;
+      const isFg = p.type === 'FINISHED';
+      t.components.forEach((c) => {
+        rows.push({
+          'รหัสสินค้า': pid,
+          'ชื่อสินค้า': p.name,
+          'ประเภทสินค้า': PRODUCT_TYPE_LABEL[p.type] || p.type,
+          'Version': t.version || '',
+          'วันที่มีผล': t.effectiveDate || '',
+          'Loss %': isFg ? '' : (t.lossPct ?? 0),
+          'Yield %': isFg ? '' : (t.yieldPct ?? 100),
+          'ผลิตได้/Batch': t.batchYieldQty ?? 1,
+          'หน่วย Batch': t.batchYieldUnit ?? 'ชิ้น',
+          'ประเภท Component': TYPE_LABEL[c.componentType] || c.componentType,
+          'รหัส Component': c.componentId,
+          'ชื่อ Component': c.name,
+          'จำนวน': c.quantity,
+          'หน่วย': c.unit,
+        });
+      });
+    });
+    if (rows.length === 0) { window.alert('ยังไม่มีข้อมูล BOM ให้ Export'); return; }
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'BOM ทั้งหมด');
+    XLSX.writeFile(wb, `BOM_ทั้งหมด_${TODAY}.xlsx`);
+  }
+
   return (
     <div>
-      <p className="font-display text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing · BOM</p>
-      <h1 className="font-display mt-1 text-xl font-semibold text-slate-900 sm:text-2xl">BOM Master / Tree / Where Used</h1>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="font-display text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing · BOM</p>
+          <h1 className="font-display mt-1 text-xl font-semibold text-slate-900 sm:text-2xl">BOM Master / Tree / Where Used</h1>
+        </div>
+        <button onClick={exportAllBoms} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"><Icon name="download" size={16} /> Export BOM ทั้งหมด (Excel)</button>
+      </div>
       <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-[280px_1fr]">
         <div>
           <div className="relative"><Icon name="search" size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -2998,6 +3035,30 @@ function BomMaster({ productId, products, materials, store, refresh }) {
     } catch (e) { setSubmitError(e.message); }
   }
 
+  function exportThisBom() {
+    if (!window.XLSX) { window.alert('ไม่สามารถโหลดไลบรารี Excel ได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต'); return; }
+    if (tree.components.length === 0) { window.alert('ยังไม่มี Component ให้ Export'); return; }
+    const rows = tree.components.map((c) => ({
+      'รหัสสินค้า': productId,
+      'ชื่อสินค้า': products[productId]?.name || productId,
+      'ประเภทสินค้า': PRODUCT_TYPE_LABEL[products[productId]?.type] || products[productId]?.type,
+      'Version': tree.version || '',
+      'วันที่มีผล': tree.effectiveDate || '',
+      'Loss %': isFinished ? '' : (tree.lossPct ?? 0),
+      'Yield %': isFinished ? '' : (tree.yieldPct ?? 100),
+      'ผลิตได้/Batch': tree.batchYieldQty ?? 1,
+      'หน่วย Batch': tree.batchYieldUnit ?? 'ชิ้น',
+      'ประเภท Component': TYPE_LABEL[c.componentType] || c.componentType,
+      'รหัส Component': c.componentId,
+      'ชื่อ Component': c.name,
+      'จำนวน': c.quantity,
+      'หน่วย': c.unit,
+    }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'BOM');
+    XLSX.writeFile(wb, `BOM_${productId}.xlsx`);
+  }
+
   return (
     <div>
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
@@ -3026,7 +3087,8 @@ function BomMaster({ productId, products, materials, store, refresh }) {
                 {tree.version && <button onClick={startEditHeader} className="inline-flex items-center gap-1 text-xs font-medium text-slate-400 hover:text-slate-600"><Icon name="pencil" size={12} /> แก้ไข</button>}
               </>
             )}
-            <div className="ml-auto">
+            <div className="ml-auto flex flex-wrap items-center gap-2">
+              <button onClick={exportThisBom} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"><Icon name="download" size={13} /> Export Excel</button>
               <button onClick={() => { setCopyOpen((v) => !v); setSubmitError(null); }} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"><Icon name="copy" size={13} /> คัดลอก BOM จากสินค้าอื่น</button>
             </div>
           </>
