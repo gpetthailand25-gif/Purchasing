@@ -1006,6 +1006,8 @@ function createStore() {
   };
 
   const forecasts = new Map();
+  const specialPeriods = {};
+  let nextSpecialId = 1;
   const purchaseOrders = [];
   const priceHistory = [];
   const actualOrderLogs = [];
@@ -1215,6 +1217,70 @@ function createStore() {
     return existing;
   }
 
+  /* --------------------------------------------------------------------------
+     งวดพิเศษ (Special Period) — สำหรับคำนวณสั่งซื้อสินค้าพิเศษที่ไม่ผูกกับเดือนปกติ
+     ใช้ key namespace แยกต่างหาก ('SP:<specialId>:<productId>') ใน Map forecasts เดิม
+     เพื่อไม่ให้ปนกับ Forecast รายเดือนปกติ และไม่กระทบ logic เดิมที่มีอยู่
+     -------------------------------------------------------------------------- */
+  function specialForecastKey(specialId, productId) { return 'SP:' + specialId + ':' + productId; }
+
+  function createSpecialPeriod({ name, note }) {
+    if (!name || !name.trim()) throw new HttpError(400, 'กรุณาระบุชื่องวดพิเศษ');
+    const id = 'SP' + nextSpecialId++;
+    specialPeriods[id] = { id, name: name.trim(), note: note || '', createdAt: new Date().toISOString() };
+    return specialPeriods[id];
+  }
+
+  function listSpecialPeriods() {
+    return Object.values(specialPeriods).sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  }
+
+  function deleteSpecialPeriod(specialId) {
+    if (!specialPeriods[specialId]) throw new HttpError(404, 'ไม่พบงวดพิเศษ: ' + specialId);
+    for (const key of Array.from(forecasts.keys())) {
+      if (key.indexOf('SP:' + specialId + ':') === 0) forecasts.delete(key);
+    }
+    delete specialPeriods[specialId];
+    return { specialId, deleted: true };
+  }
+
+  function upsertSpecialForecast({ specialId, productId, quantity, enteredBy, note }) {
+    if (!specialPeriods[specialId]) throw new HttpError(404, 'ไม่พบงวดพิเศษ: ' + specialId);
+    if (!products[productId]) throw new HttpError(400, 'ไม่พบ Product: ' + productId);
+    note = note || '';
+    const key = specialForecastKey(specialId, productId);
+    const existing = forecasts.get(key);
+    if (!existing) {
+      forecasts.set(key, { specialId, productId, quantity, revisions: [{ versionNo: 1, quantity, revisedBy: enteredBy, note, revisedDate: new Date().toISOString() }], adjustments: [], weeklyActual: {} });
+      return forecasts.get(key);
+    }
+    const versionNo = existing.revisions.length + 1;
+    existing.revisions.push({ versionNo, quantity, revisedBy: enteredBy, note, revisedDate: new Date().toISOString() });
+    existing.quantity = quantity;
+    return existing;
+  }
+
+  function listSpecialForecast(specialId) {
+    return Array.from(forecasts.values()).filter((f) => f.specialId === specialId);
+  }
+
+  function deleteSpecialForecast(specialId, productId) {
+    const key = specialForecastKey(specialId, productId);
+    if (!forecasts.has(key)) throw new HttpError(404, 'ไม่พบ Forecast รายการนี้');
+    forecasts.delete(key);
+    return { deleted: true };
+  }
+
+  function calculateMrpForSpecialPeriod(specialId, asOfDate) {
+    if (!specialPeriods[specialId]) throw new HttpError(404, 'ไม่พบงวดพิเศษ: ' + specialId);
+    const lines = listSpecialForecast(specialId);
+    if (lines.length === 0) throw new HttpError(404, 'ยังไม่มี Forecast ของงวดพิเศษนี้ กรุณาเพิ่มรายการสินค้าก่อน');
+    const repo = toEngineRepo(asOfDate);
+    const baseLines = lines.map((f) => ({ productId: f.productId, quantity: f.quantity }));
+    const base = calculateMRP(baseLines, asOfDate, repo);
+    return { base, incremental: [] };
+  }
+
   function calculateMrpForPeriod(year, month, asOfDate) {
     const lines = listForecast(year, month);
     if (lines.length === 0) throw new HttpError(404, 'ไม่พบ Forecast ของช่วงเวลานี้');
@@ -1298,7 +1364,7 @@ function createStore() {
     return boms[productId];
   }
 
-  function createPurchaseOrder({ supplierId, expectedDeliveryDate, lines }) {
+  function createPurchaseOrder({ supplierId, expectedDeliveryDate, lines, period }) {
     const poId = nextPoId++;
     const poDate = new Date().toISOString().slice(0, 10);
     for (const l of lines) {
@@ -1308,7 +1374,7 @@ function createStore() {
         material.price = l.unitPrice;
       }
     }
-    const po = { poId, poNumber: 'PO-' + String(poId).padStart(6, '0'), supplierId, poDate, expectedDeliveryDate, status: 'APPROVED', lines: lines.map((l) => ({ materialId: l.materialId, orderedQty: l.orderedQty, unitPrice: l.unitPrice, receivedQty: 0 })) };
+    const po = { poId, poNumber: 'PO-' + String(poId).padStart(6, '0'), supplierId, poDate, expectedDeliveryDate, status: 'APPROVED', period: period || null, lines: lines.map((l) => ({ materialId: l.materialId, orderedQty: l.orderedQty, unitPrice: l.unitPrice, receivedQty: 0 })) };
     purchaseOrders.push(po);
     return po;
   }
@@ -1345,12 +1411,13 @@ function createStore() {
     return po;
   }
 
-  function updatePurchaseOrder(poId, { supplierId, expectedDeliveryDate, lines } = {}) {
+  function updatePurchaseOrder(poId, { supplierId, expectedDeliveryDate, lines, period } = {}) {
     const po = getPurchaseOrder(poId);
     if (po.status === 'RECEIVED') throw new HttpError(400, 'ไม่สามารถแก้ไข PO ที่รับสินค้าครบแล้วได้');
     if (po.status === 'CANCELLED') throw new HttpError(400, 'ไม่สามารถแก้ไข PO ที่ถูกยกเลิกได้');
     if (supplierId !== undefined) po.supplierId = supplierId;
     if (expectedDeliveryDate !== undefined) po.expectedDeliveryDate = expectedDeliveryDate;
+    if (period !== undefined) po.period = period || null;
     if (Array.isArray(lines)) {
       const newLines = lines.map((l) => {
         const existing = po.lines.find((el) => el.materialId === l.materialId);
@@ -1385,7 +1452,7 @@ function createStore() {
     purchaseOrders.splice(idx, 1);
   }
 
-  function logActualOrder({ type, id, name, qty, unit, supplierName, unitPrice, month, year, note }) {
+  function logActualOrder({ type, id, name, qty, unit, supplierName, unitPrice, month, year, specialId, note }) {
     const q = Number(qty) || 0;
     const up = Number(unitPrice) || 0;
     const entry = {
@@ -1396,7 +1463,7 @@ function createStore() {
       supplierName: supplierName || null,
       unitPrice: up,
       totalPrice: round2(q * up),
-      month: month || null, year: year || null,
+      month: month || null, year: year || null, specialId: specialId || null,
       poNumber: null,
       linkedPoId: null,
       note: note || null,
@@ -1642,6 +1709,7 @@ function createStore() {
     return {
       products, materials, boms, suppliers, stock,
       forecasts: Array.from(forecasts.entries()).map(([key, value]) => ({ key, value })),
+      specialPeriods, nextSpecialId,
       purchaseOrders, priceHistory, actualOrderLogs,
       nextPoId, nextBomDetailId, nextLogId, stockUpdatedAt,
     };
@@ -1655,12 +1723,14 @@ function createStore() {
     if (data.suppliers) { for (const k of Object.keys(suppliers)) delete suppliers[k]; Object.assign(suppliers, data.suppliers); }
     if (data.stock) { for (const k of Object.keys(stock)) delete stock[k]; Object.assign(stock, data.stock); }
     if (Array.isArray(data.forecasts)) { forecasts.clear(); for (const entry of data.forecasts) forecasts.set(entry.key, entry.value); }
+    if (data.specialPeriods) { for (const k of Object.keys(specialPeriods)) delete specialPeriods[k]; Object.assign(specialPeriods, data.specialPeriods); }
     if (Array.isArray(data.purchaseOrders)) { purchaseOrders.length = 0; purchaseOrders.push(...data.purchaseOrders); }
     if (Array.isArray(data.priceHistory)) { priceHistory.length = 0; priceHistory.push(...data.priceHistory); }
     if (Array.isArray(data.actualOrderLogs)) { actualOrderLogs.length = 0; actualOrderLogs.push(...data.actualOrderLogs); }
     if (typeof data.nextPoId === 'number') nextPoId = data.nextPoId;
     if (typeof data.nextBomDetailId === 'number') nextBomDetailId = data.nextBomDetailId;
     if (typeof data.nextLogId === 'number') nextLogId = data.nextLogId;
+    if (typeof data.nextSpecialId === 'number') nextSpecialId = data.nextSpecialId;
     if (typeof data.stockUpdatedAt === 'string') stockUpdatedAt = data.stockUpdatedAt;
   }
 
@@ -1668,6 +1738,7 @@ function createStore() {
     products, materials, suppliers, stock, boms,
     createProduct, updateProduct, deleteProduct, createMaterial, updateMaterial, deleteMaterial,
     upsertForecast, addForecastAdjustment, listForecast, deleteForecast, removeForecastAdjustment, updateForecastWeeklyActual, calculateMrpForPeriod,
+    createSpecialPeriod, listSpecialPeriods, deleteSpecialPeriod, upsertSpecialForecast, listSpecialForecast, deleteSpecialForecast, calculateMrpForSpecialPeriod,
     getBomTree, whereUsed, addBomDetail, removeBomDetail, updateBomDetail, updateBomHeader,
     createPurchaseOrder, getPurchaseOrder, listPurchaseOrdersTracking, receiveGoods, updatePurchaseOrder, deletePurchaseOrder,
     logActualOrder, listActualOrderLogs, updateActualOrderLog, deleteActualOrderLog, linkActualOrderToPo,
@@ -1678,7 +1749,7 @@ function createStore() {
   };
 }
 
-const MUTATORS = ['createProduct', 'updateProduct', 'deleteProduct', 'createMaterial', 'updateMaterial', 'deleteMaterial', 'addBomDetail', 'removeBomDetail', 'updateBomDetail', 'updateBomHeader', 'upsertForecast', 'addForecastAdjustment', 'deleteForecast', 'removeForecastAdjustment', 'updateForecastWeeklyActual', 'createPurchaseOrder', 'receiveGoods', 'updatePurchaseOrder', 'deletePurchaseOrder', 'logActualOrder', 'updateActualOrderLog', 'deleteActualOrderLog', 'linkActualOrderToPo', 'importStock'];
+const MUTATORS = ['createProduct', 'updateProduct', 'deleteProduct', 'createMaterial', 'updateMaterial', 'deleteMaterial', 'addBomDetail', 'removeBomDetail', 'updateBomDetail', 'updateBomHeader', 'upsertForecast', 'addForecastAdjustment', 'deleteForecast', 'removeForecastAdjustment', 'updateForecastWeeklyActual', 'createSpecialPeriod', 'deleteSpecialPeriod', 'upsertSpecialForecast', 'deleteSpecialForecast', 'createPurchaseOrder', 'receiveGoods', 'updatePurchaseOrder', 'deletePurchaseOrder', 'logActualOrder', 'updateActualOrderLog', 'deleteActualOrderLog', 'linkActualOrderToPo', 'importStock'];
 
 /* ============================================================================
    PERSISTENCE — Firestore (client-side, ดู FIREBASE_CONFIG ด้านบนสุดของไฟล์)
@@ -1813,6 +1884,7 @@ const ICONS = {
   download: <><path d="M12 3v12" /><polyline points="7 11 12 16 17 11" /><path d="M4 19h16" /></>,
   upload: <><path d="M12 21V9" /><polyline points="7 13 12 8 17 13" /><path d="M4 19h16" /></>,
   printer: <><polyline points="6 9 6 3 18 3 18 9" /><rect x="4" y="9" width="16" height="8" rx="1" /><rect x="7" y="14" width="10" height="7" /></>,
+  star: <polygon points="12 2 15 9 22.5 9.5 17 14.5 18.5 22 12 18 5.5 22 7 14.5 1.5 9.5 9 9" />,
 };
 
 function Icon({ name, size = 16, className = '' }) {
@@ -1939,16 +2011,34 @@ function SearchableSelect({ options, value, onChange, placeholder = 'พิม�
 const STATUS_LABEL = { DRAFT: 'Draft', PENDING_APPROVAL: 'รออนุมัติ', APPROVED: 'อนุมัติแล้ว', SENT: 'ส่ง Supplier แล้ว', PARTIALLY_RECEIVED: 'รับบางส่วน', RECEIVED: 'รับครบแล้ว', CANCELLED: 'ยกเลิก' };
 const STATUS_COLOR = { DRAFT: 'bg-slate-100 text-slate-600 ring-slate-500/10', PENDING_APPROVAL: 'bg-sky-50 text-sky-700 ring-sky-600/20', APPROVED: 'bg-sky-50 text-sky-700 ring-sky-600/20', SENT: 'bg-sky-50 text-sky-700 ring-sky-600/20', PARTIALLY_RECEIVED: 'bg-amber-50 text-amber-700 ring-amber-600/20', RECEIVED: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20', CANCELLED: 'bg-red-50 text-red-700 ring-red-600/20' };
 
+function periodKeyOf(period) {
+  if (!period) return 'none';
+  return period.type === 'special' ? 'sp:' + period.specialId : 'm:' + period.year + '-' + period.month;
+}
+function periodLabel(period, specialPeriods) {
+  if (!period) return null;
+  if (period.type === 'special') {
+    const sp = (specialPeriods || []).find((s) => s.id === period.specialId);
+    return sp ? sp.name : 'งวดพิเศษ (ลบแล้ว)';
+  }
+  return `${THAI_MONTHS[period.month - 1]} ${period.year}`;
+}
+
 /* ============================================================================
    TAB: Dashboard
    ============================================================================ */
 
 function DashboardTab({ store, tick }) {
+  const now = new Date();
   const [subTab, setSubTab] = useState('purchasing');
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth() + 1);
+  const today = new Date();
+  const isCurrentMonth = year === today.getFullYear() && month === today.getMonth() + 1;
+  const asOfDate = isCurrentMonth ? today.toISOString().slice(0, 10) : `${year}-${String(month).padStart(2, '0')}-${String(new Date(year, month, 0).getDate()).padStart(2, '0')}`;
   return (
     <div>
-      <p className="font-display text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing · Dashboard</p>
-      <h1 className="font-display mt-1 text-xl font-semibold text-slate-900 sm:text-2xl">Dashboard</h1>
+      <PageHeader title="Dashboard" year={year} month={month} onYear={setYear} onMonth={setMonth} />
       <nav className="mt-5 flex gap-6 border-b border-slate-200 text-sm">
         {[['purchasing', 'Purchasing Dashboard'], ['executive', 'Executive Dashboard']].map(([key, label]) => (
           <button key={key} onClick={() => setSubTab(key)} className={`relative pb-3 font-medium transition-colors ${subTab === key ? 'text-slate-900' : 'text-slate-400 hover:text-slate-600'}`}>
@@ -1957,21 +2047,12 @@ function DashboardTab({ store, tick }) {
           </button>
         ))}
       </nav>
-      <div className="mt-6">{subTab === 'purchasing' ? <PurchasingDashboard store={store} /> : <ExecutiveDashboard store={store} />}</div>
+      <div className="mt-6">{subTab === 'purchasing' ? <PurchasingDashboard store={store} year={year} month={month} asOfDate={asOfDate} /> : <ExecutiveDashboard store={store} year={year} month={month} asOfDate={asOfDate} />}</div>
     </div>
   );
 }
 
-function resolvePeriod() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = now.getMonth() + 1;
-  const asOfDate = `${year}-${String(month).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  return { year, month, asOfDate };
-}
-
-function PurchasingDashboard({ store }) {
-  const { year, month, asOfDate } = resolvePeriod();
+function PurchasingDashboard({ store, year, month, asOfDate }) {
   const data = store.getDashboardPurchasing(year, month, asOfDate);
   const { kpis, actionRequired, materialsBelowSafety, forecastSummary } = data;
   const kpiTiles = [
@@ -2108,8 +2189,7 @@ function ChartCard({ title, children }) {
   );
 }
 
-function ExecutiveDashboard({ store }) {
-  const { year, month, asOfDate } = resolvePeriod();
+function ExecutiveDashboard({ store, year, month, asOfDate }) {
   const data = store.getDashboardExecutive(year, month, asOfDate);
   const { kpis, charts, priceIncreases, materialRisk } = data;
   const kpiTiles = [
@@ -2177,6 +2257,25 @@ function ExecutiveDashboard({ store }) {
    ============================================================================ */
 
 function ForecastTab({ store, refresh }) {
+  const [mode, setMode] = useState('normal');
+  return (
+    <div>
+      <ModeSwitch mode={mode} setMode={setMode} />
+      {mode === 'normal' ? <NormalForecastPanel store={store} refresh={refresh} /> : <SpecialForecastPanel store={store} refresh={refresh} />}
+    </div>
+  );
+}
+
+function ModeSwitch({ mode, setMode }) {
+  return (
+    <div className="mb-5 inline-flex rounded-lg border border-slate-200 bg-white p-1 text-sm">
+      <button onClick={() => setMode('normal')} className={`rounded-md px-3.5 py-1.5 font-medium transition ${mode === 'normal' ? 'bg-slate-900 text-white' : 'text-slate-500 hover:text-slate-700'}`}>งวดปกติ</button>
+      <button onClick={() => setMode('special')} className={`inline-flex items-center gap-1.5 rounded-md px-3.5 py-1.5 font-medium transition ${mode === 'special' ? 'bg-amber-600 text-white' : 'text-slate-500 hover:text-slate-700'}`}><Icon name="star" size={14} /> คำนวณพิเศษ</button>
+    </div>
+  );
+}
+
+function NormalForecastPanel({ store, refresh }) {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
@@ -2474,10 +2573,182 @@ function ForecastTab({ store, refresh }) {
 }
 
 /* ============================================================================
+   TAB: Forecast — โหมดคำนวณพิเศษ (งวดพิเศษ ไม่ผูกกับเดือนปกติ)
+   ============================================================================ */
+
+function SpecialForecastPanel({ store, refresh }) {
+  const [specialId, setSpecialId] = useState(null);
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newNote, setNewNote] = useState('');
+  const [formOpen, setFormOpen] = useState(false);
+  const [formProduct, setFormProduct] = useState('');
+  const [formQty, setFormQty] = useState('');
+  const [rowError, setRowError] = useState(null);
+  const [deleteError, setDeleteError] = useState(null);
+
+  const specialPeriods = store.listSpecialPeriods();
+  const products = store.products;
+  const boms = store.boms;
+  const finishedProducts = Object.entries(products).filter(([, p]) => p.type === 'FINISHED');
+  const productOptions = finishedProducts.map(([id, p]) => [id, `${id} — ${p.name}`]);
+  function unitOf(productId) { return boms[productId]?.batchYieldUnit || '—'; }
+
+  useEffect(() => { if (!specialId && specialPeriods.length) setSpecialId(specialPeriods[0].id); }, [specialPeriods.length]);
+  useEffect(() => { if (!formProduct && finishedProducts.length) setFormProduct(finishedProducts[0][0]); }, [products]);
+
+  const current = specialPeriods.find((p) => p.id === specialId) || null;
+  const entries = specialId ? store.listSpecialForecast(specialId) : [];
+
+  function submitCreate() {
+    if (!newName.trim()) return;
+    try {
+      const p = store.createSpecialPeriod({ name: newName, note: newNote });
+      doSaveNow(); refresh();
+      setSpecialId(p.id);
+      setNewName(''); setNewNote(''); setCreating(false);
+    } catch (e) { window.alert(e.message); }
+  }
+
+  function handleDeletePeriod(p) {
+    if (!window.confirm(`ยืนยันลบงวดพิเศษ "${p.name}"? Forecast ทั้งหมดในงวดนี้จะถูกลบไปด้วย และลบไม่สามารถย้อนกลับได้`)) return;
+    setDeleteError(null);
+    try {
+      store.deleteSpecialPeriod(p.id);
+      doSaveNow();
+      if (specialId === p.id) setSpecialId(null);
+      refresh();
+    } catch (e) { setDeleteError(e.message); }
+  }
+
+  function submitAdd() {
+    setRowError(null);
+    const qty = Number(formQty);
+    if (!formProduct || !qty || qty <= 0) return;
+    try {
+      store.upsertSpecialForecast({ specialId, productId: formProduct, quantity: qty, enteredBy: 'purchasing' });
+      doSaveNow();
+      setFormQty(''); setFormOpen(false);
+      refresh();
+    } catch (e) { setRowError(e.message); }
+  }
+
+  function handleRemove(productId, name) {
+    if (!window.confirm(`ยืนยันลบรายการ "${name}" ออกจากงวดพิเศษนี้?`)) return;
+    setRowError(null);
+    try { store.deleteSpecialForecast(specialId, productId); doSaveNow(); refresh(); }
+    catch (e) { setRowError(e.message); }
+  }
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="font-display text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing</p>
+          <h1 className="font-display mt-1 text-xl font-semibold text-slate-900 sm:text-2xl">คำนวณพิเศษ (สั่งซื้อสินค้าพิเศษ)</h1>
+        </div>
+        <button onClick={() => setCreating(true)} className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-amber-700"><Icon name="plus" size={16} /> สร้างงวดพิเศษใหม่</button>
+      </div>
+      <p className="mt-2 text-sm text-slate-500">งวดพิเศษไม่ผูกกับปฏิทินเดือนปกติ ใช้สำหรับคำนวณของที่ต้องสั่งซื้อกรณีพิเศษ เช่น งานอีเวนต์ / ออเดอร์ก้อนใหญ่ครั้งเดียว</p>
+
+      {creating && (
+        <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div><label className="text-xs font-medium text-slate-500">ชื่องวดพิเศษ</label><input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="เช่น พิเศษ - งานปีใหม่ 2569" className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+            <div><label className="text-xs font-medium text-slate-500">หมายเหตุ (ไม่บังคับ)</label><input value={newNote} onChange={(e) => setNewNote(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+          </div>
+          <div className="mt-3 flex justify-end gap-2">
+            <button onClick={() => { setCreating(false); setNewName(''); setNewNote(''); }} className="rounded-lg px-3.5 py-2 text-sm font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
+            <button onClick={submitCreate} className="rounded-lg bg-amber-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-amber-700">สร้างงวด</button>
+          </div>
+        </div>
+      )}
+
+      {specialPeriods.length === 0 && !creating ? (
+        <div className="mt-6 rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center text-sm text-slate-400">ยังไม่มีงวดพิเศษ กด "สร้างงวดพิเศษใหม่" เพื่อเริ่มต้น</div>
+      ) : (
+        <>
+          <div className="mt-5 flex flex-wrap items-center gap-2">
+            {specialPeriods.map((p) => (
+              <button key={p.id} onClick={() => setSpecialId(p.id)} className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition ${specialId === p.id ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 ring-1 ring-inset ring-slate-200 hover:bg-slate-50'}`}>
+                <Icon name="star" size={11} /> {p.name}
+              </button>
+            ))}
+          </div>
+
+          {current && (
+            <div className="mt-5 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-800">{current.name}</h3>
+                  {current.note && <p className="mt-0.5 text-xs text-slate-400">{current.note}</p>}
+                  <p className="mt-0.5 text-[11px] text-slate-400">สร้างเมื่อ {new Date(current.createdAt).toLocaleDateString('th-TH')}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => setFormOpen((v) => !v)} className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700"><Icon name="plus" size={13} /> เพิ่มสินค้า</button>
+                  <button onClick={() => handleDeletePeriod(current)} title="ลบงวดพิเศษนี้" className="rounded-lg p-1.5 text-slate-300 hover:bg-red-50 hover:text-red-600"><Icon name="trash" size={14} /></button>
+                </div>
+              </div>
+              {deleteError && <p className="mt-2 text-xs text-red-600">{deleteError}</p>}
+
+              {formOpen && (
+                <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    <div className="sm:col-span-2"><label className="text-xs font-medium text-slate-500">Product</label><div className="mt-1"><SearchableSelect options={productOptions} value={formProduct} onChange={setFormProduct} placeholder="พิมพ์ค้นหารหัส/ชื่อสินค้า..." /></div></div>
+                    <div><label className="text-xs font-medium text-slate-500">จำนวน</label>
+                      <div className="mt-1 flex items-center gap-2">
+                        <input type="number" value={formQty} onChange={(e) => setFormQty(e.target.value)} placeholder="เช่น 500" className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
+                        <span className="whitespace-nowrap rounded-lg bg-white px-2.5 py-2 text-sm font-medium text-slate-500 ring-1 ring-inset ring-slate-200">{unitOf(formProduct)}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex justify-end gap-2">
+                    <button onClick={() => setFormOpen(false)} className="rounded-lg px-3 py-1.5 text-xs font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
+                    <button onClick={submitAdd} className="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700">เพิ่ม</button>
+                  </div>
+                </div>
+              )}
+              {rowError && <p className="mt-2 text-xs text-red-600">{rowError}</p>}
+
+              <div className="mt-4 overflow-x-auto rounded-lg border border-slate-200">
+                <table className="w-full text-sm">
+                  <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-2">Product</th><th className="px-4 py-2 text-right">จำนวน</th><th className="px-4 py-2"></th></tr></thead>
+                  <tbody>
+                    {entries.length === 0 && <tr><td colSpan={3} className="px-4 py-6 text-center text-xs text-slate-400">ยังไม่มีสินค้าในงวดพิเศษนี้</td></tr>}
+                    {entries.map((entry) => (
+                      <tr key={entry.productId} className="border-b border-slate-50 last:border-0">
+                        <td className="px-4 py-2.5 font-medium text-slate-700">{products[entry.productId]?.name || entry.productId}</td>
+                        <td className="px-4 py-2.5 text-right tabular">{fmt(entry.quantity)} {unitOf(entry.productId)}</td>
+                        <td className="px-4 py-2.5 text-right"><button onClick={() => handleRemove(entry.productId, products[entry.productId]?.name)} title="ลบ" className="text-slate-300 hover:text-red-500"><Icon name="trash" size={14} /></button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="mt-3 text-xs text-slate-400">กรอกสินค้าที่ต้องการครบแล้ว ไปที่แท็บ MRP แล้วเลือกโหมด "คำนวณพิเศษ" เพื่อคำนวณของที่ต้องสั่งซื้อจากงวดนี้</p>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================================
    TAB: MRP
    ============================================================================ */
 
 function MrpTab({ store, refresh }) {
+  const [mode, setMode] = useState('normal');
+  return (
+    <div>
+      <ModeSwitch mode={mode} setMode={setMode} />
+      {mode === 'normal' ? <NormalMrpPanel store={store} refresh={refresh} /> : <SpecialMrpPanel store={store} refresh={refresh} />}
+    </div>
+  );
+}
+
+function NormalMrpPanel({ store, refresh }) {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
@@ -2643,6 +2914,97 @@ function MrpTab({ store, refresh }) {
         </>
       )}
       <ActualOrderHistory store={store} refresh={refresh} />
+    </div>
+  );
+}
+
+function SpecialMrpPanel({ store, refresh }) {
+  const [specialId, setSpecialId] = useState(null);
+  const [mrpResult, setMrpResult] = useState(null);
+  const [calculatedAt, setCalculatedAt] = useState(null);
+  const [error, setError] = useState(null);
+  const [expanded, setExpanded] = useState(null);
+  const [actualPurchase, setActualPurchase] = useState({});
+  const [savedRows, setSavedRows] = useState({});
+
+  const products = store.products;
+  const materials = store.materials;
+  const specialPeriods = store.listSpecialPeriods();
+
+  useEffect(() => { if (!specialId && specialPeriods.length) setSpecialId(specialPeriods[0].id); }, [specialPeriods.length]);
+
+  function nameOf(type, id) { return type === 'SEMI_FINISHED' ? (products[id]?.name || id) : (materials[id]?.name || id); }
+
+  function saveActualOrder(rowKey, payload) {
+    store.logActualOrder({ ...payload, specialId });
+    setSavedRows((prev) => ({ ...prev, [rowKey]: Date.now() }));
+    refresh();
+  }
+
+  const orderedSoFar = {};
+  for (const l of store.listActualOrderLogs()) {
+    if (l.specialId !== specialId) continue;
+    const key = l.type + l.id;
+    const cur = orderedSoFar[key] || { qty: 0, unit: l.unit, count: 0 };
+    cur.qty += l.qty; cur.count += 1;
+    orderedSoFar[key] = cur;
+  }
+
+  function runMRP() {
+    setError(null); setMrpResult(null);
+    if (!specialId) return;
+    try {
+      const asOfDate = new Date().toISOString().slice(0, 10);
+      const result = store.calculateMrpForSpecialPeriod(specialId, asOfDate);
+      setMrpResult(result); setCalculatedAt(new Date());
+    } catch (e) { setError(e); }
+  }
+
+  const kpis = useMemo(() => {
+    if (!mrpResult) return null;
+    const all = [...mrpResult.base, ...mrpResult.incremental];
+    const toOrder = all.filter((r) => r.needsAction);
+    const value = toOrder.reduce((s, r) => s + r.requirementValue, 0);
+    return { count: toOrder.length, value };
+  }, [mrpResult]);
+
+  const current = specialPeriods.find((p) => p.id === specialId) || null;
+
+  if (specialPeriods.length === 0) {
+    return (
+      <div>
+        <p className="font-display text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing</p>
+        <h1 className="font-display mt-1 text-xl font-semibold text-slate-900 sm:text-2xl">MRP พิเศษ</h1>
+        <div className="mt-6 rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center text-sm text-slate-400">ยังไม่มีงวดพิเศษ ไปที่แท็บ Forecast → คำนวณพิเศษ เพื่อสร้างงวดและกรอกสินค้าก่อน</div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="font-display text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing</p>
+          <h1 className="font-display mt-1 text-xl font-semibold text-slate-900 sm:text-2xl">MRP พิเศษ{current ? ` — ${current.name}` : ''}</h1>
+        </div>
+        <div className="flex items-center gap-2">
+          <select value={specialId || ''} onChange={(e) => { setSpecialId(e.target.value); setMrpResult(null); setError(null); }} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
+            {specialPeriods.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+          <button onClick={runMRP} className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-3.5 py-2 text-sm font-medium text-white transition hover:bg-amber-700"><Icon name="calculator" size={16} /> คำนวณ MRP พิเศษ</button>
+        </div>
+      </div>
+      <p className="mt-2 text-sm text-slate-500">{calculatedAt ? `คำนวณล่าสุด ${calculatedAt.toLocaleTimeString('th-TH')}` : 'กด "คำนวณ MRP พิเศษ" เพื่อ Explode BOM จากรายการสินค้าในงวดนี้'}</p>
+      {error && <div className="mt-4"><ErrorBox message={error.message} onRetry={runMRP} /></div>}
+      {kpis && (
+        <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <KpiCard label="รายการที่ต้องสั่ง/ผลิต" value={kpis.count} suffix="รายการ" />
+          <KpiCard label="มูลค่าที่ต้องสั่งเพิ่ม" value={fmtBaht(kpis.value)} />
+        </div>
+      )}
+      {mrpResult && (
+        <MrpTable title={`MRP พิเศษ${current ? ' — ' + current.name : ''}`} rows={mrpResult.base} nameOf={nameOf} materials={materials} expanded={expanded} setExpanded={setExpanded} actualPurchase={actualPurchase} setActualPurchase={setActualPurchase} onSave={saveActualOrder} savedRows={savedRows} orderedSoFar={orderedSoFar} />
+      )}
     </div>
   );
 }
@@ -3780,15 +4142,28 @@ function PoTab({ store, refresh }) {
   const [editingPoId, setEditingPoId] = useState(null);
   const [expandedPoId, setExpandedPoId] = useState(null);
   const [deleteError, setDeleteError] = useState(null);
+  const [periodFilter, setPeriodFilter] = useState('all');
 
   const suppliers = store.suppliers;
   const materials = store.materials;
-  const pos = store.listPurchaseOrdersTracking();
+  const specialPeriods = store.listSpecialPeriods();
+  const allPos = store.listPurchaseOrdersTracking();
+
+  const periodOptions = useMemo(() => {
+    const map = new Map();
+    for (const po of allPos) {
+      const key = periodKeyOf(po.period);
+      if (!map.has(key)) map.set(key, { key, label: po.period ? periodLabel(po.period, specialPeriods) : 'ไม่ระบุงวด' });
+    }
+    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label, 'th'));
+  }, [allPos, specialPeriods]);
+
+  const pos = periodFilter === 'all' ? allPos : allPos.filter((po) => periodKeyOf(po.period) === periodFilter);
 
   if (creating) return <CreatePoForm store={store} suppliers={suppliers} materials={materials} onDone={() => { setCreating(false); refresh(); }} onCancel={() => setCreating(false)} />;
 
   if (editingPoId !== null) {
-    const editingPo = pos.find((p) => p.poId === editingPoId);
+    const editingPo = allPos.find((p) => p.poId === editingPoId);
     if (editingPo) {
       return <CreatePoForm store={store} suppliers={suppliers} materials={materials} editPo={editingPo} onDone={() => { setEditingPoId(null); refresh(); }} onCancel={() => setEditingPoId(null)} />;
     }
@@ -3815,7 +4190,13 @@ function PoTab({ store, refresh }) {
     <div>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div><p className="font-display text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing</p><h1 className="font-display mt-1 text-xl font-semibold text-slate-900 sm:text-2xl">PO Tracking</h1></div>
-        <button onClick={() => setCreating(true)} className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-amber-700"><Icon name="plus" size={16} /> สร้าง PO</button>
+        <div className="flex flex-wrap items-center gap-2">
+          <select value={periodFilter} onChange={(e) => setPeriodFilter(e.target.value)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
+            <option value="all">ทุกงวด</option>
+            {periodOptions.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+          </select>
+          <button onClick={() => setCreating(true)} className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-amber-700"><Icon name="plus" size={16} /> สร้าง PO</button>
+        </div>
       </div>
       <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-3">
         <KpiCard label="มูลค่า PO ทั้งหมด" value={fmtBaht(totalValue)} />
@@ -3825,9 +4206,9 @@ function PoTab({ store, refresh }) {
       {deleteError && <div className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{deleteError}</div>}
       <div className="mt-6 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
-          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">PO</th><th className="px-4 py-3">Supplier</th><th className="px-4 py-3 text-right">Ordered</th><th className="px-4 py-3 text-right">Received</th><th className="px-4 py-3 text-right">Outstanding</th><th className="px-4 py-3 text-right">มูลค่า</th><th className="px-4 py-3">กำหนดส่ง</th><th className="px-4 py-3">สถานะ</th><th className="px-4 py-3 text-right">จัดการ</th></tr></thead>
+          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">PO</th><th className="px-4 py-3">Supplier</th><th className="px-4 py-3">งวด</th><th className="px-4 py-3 text-right">Ordered</th><th className="px-4 py-3 text-right">Received</th><th className="px-4 py-3 text-right">Outstanding</th><th className="px-4 py-3 text-right">มูลค่า</th><th className="px-4 py-3">กำหนดส่ง</th><th className="px-4 py-3">สถานะ</th><th className="px-4 py-3 text-right">จัดการ</th></tr></thead>
           <tbody>
-            {pos.length === 0 && <tr><td colSpan={9} className="px-4 py-8 text-center text-sm text-slate-400">ยังไม่มี PO</td></tr>}
+            {pos.length === 0 && <tr><td colSpan={10} className="px-4 py-8 text-center text-sm text-slate-400">ยังไม่มี PO</td></tr>}
             {pos.map((po) => {
               const isOpen = expandedPoId === po.poId;
               const totalOrdered = po.lines.reduce((s, l) => s + l.orderedQty, 0);
@@ -3835,11 +4216,15 @@ function PoTab({ store, refresh }) {
               const totalOutstanding = po.lines.reduce((s, l) => s + l.outstanding, 0);
               const totalPoValue = po.lines.reduce((s, l) => s + l.orderedQty * l.unitPrice, 0);
               const progress = totalOrdered > 0 ? (totalReceived / totalOrdered) * 100 : 0;
+              const pLabel = periodLabel(po.period, specialPeriods);
               return (
                 <Fragment key={po.poId}>
                   <tr className="cursor-pointer border-b border-slate-50 last:border-0 hover:bg-slate-50/60" onClick={() => setExpandedPoId(isOpen ? null : po.poId)}>
                     <td className="px-4 py-3"><div className="flex items-center gap-1.5 font-medium text-slate-800"><Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={14} className="text-slate-400" /> {po.poNumber}</div></td>
                     <td className="px-4 py-3 text-slate-600">{suppliers[po.supplierId]?.name}</td>
+                    <td className="px-4 py-3">{pLabel ? (
+                      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${po.period?.type === 'special' ? 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-200' : 'bg-slate-100 text-slate-600'}`}>{po.period?.type === 'special' && <Icon name="star" size={10} />}{pLabel}</span>
+                    ) : <span className="text-slate-300">—</span>}</td>
                     <td className="px-4 py-3 text-right tabular">{fmt(totalOrdered)}</td>
                     <td className="px-4 py-3 text-right tabular">{fmt(totalReceived)}</td>
                     <td className="px-4 py-3 text-right tabular font-medium text-slate-900">{fmt(totalOutstanding)}</td>
@@ -3867,7 +4252,7 @@ function PoTab({ store, refresh }) {
                     </td>
                   </tr>
                   {isOpen && (
-                    <tr className="bg-slate-50/40"><td colSpan={9} className="px-4 py-4">
+                    <tr className="bg-slate-50/40"><td colSpan={10} className="px-4 py-4">
                       <div className="rounded-lg border border-slate-200 bg-white p-4">
                         <div className="mb-3 h-1.5 w-full overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${progress >= 100 ? 'bg-emerald-500' : 'bg-amber-500'}`} style={{ width: `${Math.min(100, progress)}%` }} /></div>
                         <div className="overflow-x-auto">
@@ -3891,10 +4276,16 @@ function PoTab({ store, refresh }) {
 
 function CreatePoForm({ store, suppliers, materials, onDone, onCancel, editPo = null }) {
   const isEdit = !!editPo;
+  const now = new Date();
   const firstSupplier = Object.keys(suppliers)[0];
   const firstMaterial = Object.keys(materials)[0];
+  const specialPeriods = store.listSpecialPeriods();
   const [supplierId, setSupplierId] = useState(isEdit ? editPo.supplierId : (firstSupplier || ''));
   const [expectedDeliveryDate, setExpectedDeliveryDate] = useState(isEdit ? editPo.expectedDeliveryDate : '');
+  const [periodType, setPeriodType] = useState(isEdit && editPo.period?.type === 'special' ? 'special' : 'month');
+  const [poYear, setPoYear] = useState(isEdit && editPo.period?.type === 'month' ? editPo.period.year : now.getFullYear());
+  const [poMonth, setPoMonth] = useState(isEdit && editPo.period?.type === 'month' ? editPo.period.month : now.getMonth() + 1);
+  const [poSpecialId, setPoSpecialId] = useState(isEdit && editPo.period?.type === 'special' ? editPo.period.specialId : (specialPeriods[0]?.id || ''));
   const [lines, setLines] = useState(
     isEdit
       ? editPo.lines.map((l) => ({ materialId: l.materialId, orderedQty: l.orderedQty, unitPrice: l.unitPrice, receivedQty: l.receivedQty }))
@@ -3911,16 +4302,17 @@ function CreatePoForm({ store, suppliers, materials, onDone, onCancel, editPo = 
   }
 
   const total = lines.reduce((s, l) => s + (Number(l.orderedQty) || 0) * (Number(l.unitPrice) || 0), 0);
-  const canSubmit = expectedDeliveryDate && lines.every((l) => Number(l.orderedQty) > 0 && Number(l.orderedQty) >= (l.receivedQty || 0));
+  const canSubmit = expectedDeliveryDate && lines.every((l) => Number(l.orderedQty) > 0 && Number(l.orderedQty) >= (l.receivedQty || 0)) && (periodType === 'month' || poSpecialId);
 
   function submit() {
     if (!canSubmit) return;
     setSubmitError(null);
+    const period = periodType === 'special' ? { type: 'special', specialId: poSpecialId } : { type: 'month', year: Number(poYear), month: Number(poMonth) };
     try {
       if (isEdit) {
-        store.updatePurchaseOrder(editPo.poId, { supplierId, expectedDeliveryDate, lines: lines.map((l) => ({ materialId: l.materialId, orderedQty: Number(l.orderedQty), unitPrice: Number(l.unitPrice) })) });
+        store.updatePurchaseOrder(editPo.poId, { supplierId, expectedDeliveryDate, period, lines: lines.map((l) => ({ materialId: l.materialId, orderedQty: Number(l.orderedQty), unitPrice: Number(l.unitPrice) })) });
       } else {
-        store.createPurchaseOrder({ supplierId, expectedDeliveryDate, lines: lines.map((l) => ({ materialId: l.materialId, orderedQty: Number(l.orderedQty), unitPrice: Number(l.unitPrice) })) });
+        store.createPurchaseOrder({ supplierId, expectedDeliveryDate, period, lines: lines.map((l) => ({ materialId: l.materialId, orderedQty: Number(l.orderedQty), unitPrice: Number(l.unitPrice) })) });
       }
       onDone();
     } catch (e) { setSubmitError(e.message); }
@@ -3938,6 +4330,31 @@ function CreatePoForm({ store, suppliers, materials, onDone, onCancel, editPo = 
             </select>
           </div>
           <div><label className="text-xs font-medium text-slate-500">Expected Delivery Date</label><input type="date" value={expectedDeliveryDate} onChange={(e) => setExpectedDeliveryDate(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+        </div>
+        <div className="mt-4">
+          <label className="text-xs font-medium text-slate-500">งวดของ PO นี้</label>
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1 text-sm">
+              <button type="button" onClick={() => setPeriodType('month')} className={`rounded-md px-3 py-1.5 font-medium transition ${periodType === 'month' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>งวดปกติ</button>
+              <button type="button" onClick={() => setPeriodType('special')} className={`inline-flex items-center gap-1 rounded-md px-3 py-1.5 font-medium transition ${periodType === 'special' ? 'bg-white text-amber-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Icon name="star" size={12} /> งวดพิเศษ</button>
+            </div>
+            {periodType === 'month' ? (
+              <div className="flex items-center gap-1.5">
+                <select value={poMonth} onChange={(e) => setPoMonth(Number(e.target.value))} className="rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
+                  {THAI_MONTHS.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
+                </select>
+                <select value={poYear} onChange={(e) => setPoYear(Number(e.target.value))} className="rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
+                  {[poYear - 1, poYear, poYear + 1].map((y) => <option key={y} value={y}>{y}</option>)}
+                </select>
+              </div>
+            ) : specialPeriods.length === 0 ? (
+              <span className="text-xs text-slate-400">ยังไม่มีงวดพิเศษ — ไปสร้างที่แท็บ Forecast → คำนวณพิเศษ ก่อน</span>
+            ) : (
+              <select value={poSpecialId} onChange={(e) => setPoSpecialId(e.target.value)} className="rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
+                {specialPeriods.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            )}
+          </div>
         </div>
         <div className="mt-5">
           <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">รายการวัตถุดิบ</p>
