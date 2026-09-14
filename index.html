@@ -1160,6 +1160,8 @@ function createStore() {
 
   function upsertForecast({ year, month, productId, quantity, enteredBy, note }) {
     if (!products[productId]) throw new HttpError(400, 'ไม่พบ Product: ' + productId);
+    // ป้องกันไม่ให้ field เป็น undefined เด็ดขาด เพราะ Firestore .set() จะ throw ทันทีถ้าเจอ undefined
+    note = note || '';
     const key = forecastKey(year, month, productId);
     const existing = forecasts.get(key);
     if (!existing) {
@@ -1186,7 +1188,9 @@ function createStore() {
     const key = forecastKey(year, month, productId);
     const existing = forecasts.get(key);
     if (!existing) throw new HttpError(404, 'ไม่พบ Forecast หลักของช่วงเวลานี้ กรุณากรอก Forecast ประจำเดือนก่อน');
-    const adjustment = { additionalQty, customerChannel, note, enteredBy, adjustDate: new Date().toISOString() };
+    // ป้องกันไม่ให้ field เป็น undefined เด็ดขาด เพราะ Firestore .set() จะ throw ทันทีถ้าเจอ undefined
+    // ทำให้สถานะ "กำลังบันทึก..." ค้างตลอดไป (ดู performSave ด้านล่าง)
+    const adjustment = { additionalQty, customerChannel: customerChannel || '', note: note || '', enteredBy, adjustDate: new Date().toISOString() };
     existing.adjustments.push(adjustment);
     return adjustment;
   }
@@ -1699,14 +1703,35 @@ let __resaveNeeded = false;
 function emitSaveStatus(status, message) {
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('app-save-status', { detail: { status, message, at: Date.now() } }));
 }
+function deepStripUndefined(value) {
+  // Firestore .set() throw แบบ synchronous ทันทีถ้าเจอ field ใดๆ เป็น undefined (แม้ซ้อนอยู่ลึกแค่ไหน)
+  // ทำให้โค้ดกระโดดข้าม .catch()/.finally() ไปเลย และสถานะ "กำลังบันทึก..." ค้างตลอดไปแบบกู้ไม่ได้
+  // ฟังก์ชันนี้เป็นตาข่ายกันสุดท้าย: เดินไล่ข้อมูลทั้งหมดก่อนส่ง แล้วแปลง undefined -> null (Firestore รับ null ได้)
+  if (value === undefined) return null;
+  if (Array.isArray(value)) return value.map(deepStripUndefined);
+  if (value && typeof value === 'object' && !(value instanceof Date)) {
+    const out = {};
+    for (const k of Object.keys(value)) out[k] = deepStripUndefined(value[k]);
+    return out;
+  }
+  return value;
+}
 function performSave() {
   const db = window.__firestoreDb;
   if (!db || !__lastStore) return;
   __saveInFlight = true;
   emitSaveStatus('saving');
   const timeoutMs = 10000;
-  // snapshot() ถูกเรียก ณ ตอนนี้เท่านั้น (ไม่ใช่ตอน schedule) เพื่อให้ได้ข้อมูลล่าสุดที่สุดเสมอ
-  const writePromise = db.collection('app_state').doc('snapshot').set({ data: __lastStore.snapshot(), savedAt: new Date().toISOString() });
+  let writePromise;
+  try {
+    // snapshot() ถูกเรียก ณ ตอนนี้เท่านั้น (ไม่ใช่ตอน schedule) เพื่อให้ได้ข้อมูลล่าสุดที่สุดเสมอ
+    const cleanData = deepStripUndefined(__lastStore.snapshot());
+    writePromise = db.collection('app_state').doc('snapshot').set({ data: cleanData, savedAt: new Date().toISOString() });
+  } catch (e) {
+    // ดัก error ที่ .set() อาจ throw ทันที (synchronous) เช่นข้อมูลผิดรูปแบบอื่นๆ ที่ deepStripUndefined ไม่ครอบคลุม
+    // ป้องกันไม่ให้ __saveInFlight ค้างเป็น true ตลอดไปจนบันทึกครั้งต่อไปไม่ทำงานอีกเลย
+    writePromise = Promise.reject(e);
+  }
   const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('หมดเวลารอการเชื่อมต่อ (ตรวจสอบสัญญาณเน็ต)')), timeoutMs));
   Promise.race([writePromise, timeout])
     .then(() => emitSaveStatus('success'))
