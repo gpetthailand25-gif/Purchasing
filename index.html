@@ -2736,7 +2736,7 @@ function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actua
                         <div className="text-[11px] font-medium text-emerald-600">Forecast {fmt(r.grossRequirement)} + สั่งเพิ่ม {fmt(incrementalByKey[r.type + r.id])} = <span className="font-semibold">{fmt(r.grossRequirement + incrementalByKey[r.type + r.id])} {r.unit}</span></div>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-right tabular text-slate-500">{fmt(r.currentStock)} {r.unit}</td>
+                    <td className="px-4 py-3 text-right tabular text-slate-500">{isMaterial ? `${fmt(r.currentStock / conversionRate)} ${purchaseUnit}` : `${fmt(r.currentStock)} ${r.unit}`}</td>
                     <td className="px-4 py-3 text-right tabular text-slate-500">{fmt(r.openQty)} {r.unit}</td>
                     <td className="px-4 py-3 text-right tabular text-slate-500">{isMaterial ? (mat?.moq ? `${fmt(mat.moq)} ${purchaseUnit}` : '—') : `${fmt(r.safetyStock)} ${r.unit}`}</td>
                     <td className="px-4 py-3 text-right tabular font-semibold text-slate-900">{fmt(r.netRequirement)} {r.unit}</td>
@@ -3642,7 +3642,9 @@ function MaterialsTab({ store, refresh }) {
     try { store.deleteMaterial(id); refresh(); } catch (e) { setRowError({ id, message: e.message }); }
   }
 
-  const filtered = Object.entries(materials).filter(([id, m]) => search === '' || m.name.includes(search) || id.includes(search));
+  const filtered = Object.entries(materials)
+    .filter(([id, m]) => search === '' || m.name.includes(search) || id.includes(search))
+    .sort(([idA], [idB]) => idA.localeCompare(idB, undefined, { numeric: true, sensitivity: 'base' }));
 
   return (
     <div>
