@@ -54,6 +54,13 @@
     if (FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey.indexOf('PASTE_') !== 0) {
       firebase.initializeApp(FIREBASE_CONFIG);
       window.__firestoreDb = firebase.firestore();
+      // เปิด offline persistence: ถ้าเน็ตหลุด/สัญญาณอ่อน ระบบจะเก็บข้อมูลที่ยังบันทึกไม่สำเร็จไว้ใน
+      // IndexedDB ของเครื่อง (อยู่รอดแม้รีเฟรชหน้า) แล้วส่งขึ้น Firestore ให้อัตโนมัติทันทีที่เน็ตกลับมา
+      window.__firestoreDb.enablePersistence({ synchronizeTabs: true }).then(() => {
+        console.log('[persistence] เปิด offline persistence สำเร็จ');
+      }).catch((e) => {
+        console.warn('[persistence] เปิด offline persistence ไม่สำเร็จ (เช่น เปิดหลายแท็บพร้อมกัน หรือเบราว์เซอร์ไม่รองรับ):', e.code || e);
+      });
       console.log('[persistence] เชื่อมต่อ Firestore สำเร็จ');
     } else {
       console.warn('[persistence] ยังไม่ได้ตั้งค่า FIREBASE_CONFIG — ข้อมูลจะไม่ถูกบันทึกถาวร');
@@ -1701,7 +1708,9 @@ function doSaveNow() {
   clearTimeout(__saveTimer);
   __saveInFlight = true;
   emitSaveStatus('saving');
-  fn()
+  const timeoutMs = 10000;
+  const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('หมดเวลารอการเชื่อมต่อ (ตรวจสอบสัญญาณเน็ต)')), timeoutMs));
+  Promise.race([fn(), timeout])
     .then(() => emitSaveStatus('success'))
     .catch((e) => { console.error('[persistence] บันทึกข้อมูลไม่สำเร็จ:', e); emitSaveStatus('error', e.message || String(e)); })
     .finally(() => { __saveInFlight = false; });
