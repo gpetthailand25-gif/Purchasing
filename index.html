@@ -1632,16 +1632,13 @@ function createStore() {
   }
 
   function snapshot() {
+    // หมายเหตุ: ส่ง reference ตรงๆ โดยไม่ deep-clone ผ่าน JSON.stringify/parse เพราะ Firestore
+    // SDK จัดการ serialize ให้เองอยู่แล้ว การ clone ซ้ำเป็นภาระ CPU ที่ไม่จำเป็นและจะช้าขึ้นเรื่อยๆ
+    // เมื่อข้อมูล (โดยเฉพาะ purchaseOrders/priceHistory/actualOrderLogs) สะสมมากขึ้นตามการใช้งานจริง
     return {
-      products: JSON.parse(JSON.stringify(products)),
-      materials: JSON.parse(JSON.stringify(materials)),
-      boms: JSON.parse(JSON.stringify(boms)),
-      suppliers: JSON.parse(JSON.stringify(suppliers)),
-      stock: JSON.parse(JSON.stringify(stock)),
+      products, materials, boms, suppliers, stock,
       forecasts: Array.from(forecasts.entries()).map(([key, value]) => ({ key, value })),
-      purchaseOrders: JSON.parse(JSON.stringify(purchaseOrders)),
-      priceHistory: JSON.parse(JSON.stringify(priceHistory)),
-      actualOrderLogs: JSON.parse(JSON.stringify(actualOrderLogs)),
+      purchaseOrders, priceHistory, actualOrderLogs,
       nextPoId, nextBomDetailId, nextLogId, stockUpdatedAt,
     };
   }
@@ -2168,6 +2165,8 @@ function ForecastTab({ store, refresh }) {
   const [adjChannel, setAdjChannel] = useState('');
   const [rowError, setRowError] = useState(null);
   const [weeklyOpenFor, setWeeklyOpenFor] = useState(null);
+  const [adjSaving, setAdjSaving] = useState(false);
+  const adjSavingRef = useRef(false);
   const [importBusy, setImportBusy] = useState(false);
   const [importResult, setImportResult] = useState(null);
   const fileInputRef = useRef(null);
@@ -2272,12 +2271,16 @@ function ForecastTab({ store, refresh }) {
   }
 
   function submitAdjustment(productId) {
+    if (adjSavingRef.current) return; // กันกดซ้ำจนบันทึกซ้อนกัน (double-submit)
     const qty = Number(adjQty);
     if (!qty || qty <= 0) return;
+    adjSavingRef.current = true;
+    setAdjSaving(true);
     store.addForecastAdjustment({ year, month, productId, additionalQty: qty, customerChannel: adjChannel, enteredBy: 'purchasing' });
     doSaveNow();
     setAdjQty(''); setAdjChannel('');
     refresh();
+    setTimeout(() => { adjSavingRef.current = false; setAdjSaving(false); }, 900);
   }
 
   function handleRemoveAdjustment(productId, index) {
@@ -2430,7 +2433,7 @@ function ForecastTab({ store, refresh }) {
                       <div className="flex flex-wrap items-end gap-3">
                         <div><label className="text-xs font-medium text-slate-500">จำนวน Order เพิ่ม</label><input type="number" value={adjQty} onChange={(e) => setAdjQty(e.target.value)} className="mt-1 block w-32 rounded-lg border border-slate-200 px-3 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
                         <div><label className="text-xs font-medium text-slate-500">ลูกค้า / ช่องทาง</label><input value={adjChannel} onChange={(e) => setAdjChannel(e.target.value)} placeholder="เช่น Modern Trade" className="mt-1 block w-48 rounded-lg border border-slate-200 px-3 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
-                        <button onClick={() => submitAdjustment(entry.productId)} className="rounded-lg bg-slate-900 px-3.5 py-1.5 text-sm font-medium text-white hover:bg-slate-700">บันทึก</button>
+                        <button onClick={() => submitAdjustment(entry.productId)} disabled={adjSaving} className="rounded-lg bg-slate-900 px-3.5 py-1.5 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50">{adjSaving ? 'กำลังบันทึก...' : 'บันทึก'}</button>
                         <button onClick={() => setAdjOpenFor(null)} className="rounded-lg px-3.5 py-1.5 text-sm font-medium text-slate-500 hover:bg-slate-100">ปิด</button>
                       </div>
                     </td></tr>
