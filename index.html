@@ -3470,7 +3470,7 @@ function BomTab({ store, refresh }) {
                 <select value={newProductType} onChange={(e) => setNewProductType(e.target.value)} className="w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
                   <option value="FINISHED">Finished Product</option>
                   <option value="SEMI_FINISHED">Semi-Finished</option>
-                  <option value="WIP">WIP Product</option>
+                  <option value="WIP">WIP-Finished</option>
                 </select>
                 <input value={newProductId} onChange={(e) => setNewProductId(e.target.value)} placeholder="รหัสสินค้า (ไม่กรอก = สร้างอัตโนมัติ)" className="mt-2 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
                 <input value={newProductName} onChange={(e) => setNewProductName(e.target.value)} placeholder="ชื่อสินค้า" className="mt-2 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
@@ -3498,7 +3498,7 @@ function BomTab({ store, refresh }) {
               </button>
             ))}
           </div>
-          <p className="mb-1.5 mt-4 px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">WIP Product</p>
+          <p className="mb-1.5 mt-4 px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">WIP-Finished</p>
           <div className="space-y-1">
             {filtered.filter(([, p]) => p.type === 'WIP').map(([id, p]) => (
               <button key={id} onClick={() => { setSelectedProduct(id); setTab('master'); }} className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition ${selectedProduct === id ? 'bg-slate-900 font-medium text-white' : 'text-slate-600 hover:bg-slate-100'}`}>
@@ -3532,7 +3532,7 @@ function BomTab({ store, refresh }) {
                       <select value={productDraft.type} onChange={(e) => setProductDraft((d) => ({ ...d, type: e.target.value }))} className="mt-1 block rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
                         <option value="FINISHED">Finished Product</option>
                         <option value="SEMI_FINISHED">Semi-Finished</option>
-                        <option value="WIP">WIP Product</option>
+                        <option value="WIP">WIP-Finished</option>
                       </select>
                     </div>
                     {productEditError && <p className="text-xs text-red-600">{productEditError}</p>}
