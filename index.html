@@ -4151,11 +4151,29 @@ function PoTab({ store, refresh }) {
 
   const periodOptions = useMemo(() => {
     const map = new Map();
-    for (const po of allPos) {
-      const key = periodKeyOf(po.period);
-      if (!map.has(key)) map.set(key, { key, label: po.period ? periodLabel(po.period, specialPeriods) : 'ไม่ระบุงวด' });
+    const now = new Date();
+    // เดือนปัจจุบัน ±1 เดือน ให้เลือกกรองได้เสมอ แม้ยังไม่มี PO ผูกกับงวดนั้นเลยก็ตาม
+    for (let offset = -1; offset <= 1; offset++) {
+      const d = new Date(now.getFullYear(), now.getMonth() + offset, 1);
+      const period = { type: 'month', year: d.getFullYear(), month: d.getMonth() + 1 };
+      const key = periodKeyOf(period);
+      if (!map.has(key)) map.set(key, { key, label: periodLabel(period, specialPeriods), isSpecial: false });
     }
-    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label, 'th'));
+    // งวดพิเศษที่มีอยู่ทั้งหมด ให้เลือกกรองได้เสมอ แม้ยังไม่มี PO ผูกไว้เลยก็ตาม
+    for (const sp of specialPeriods) {
+      const key = periodKeyOf({ type: 'special', specialId: sp.id });
+      if (!map.has(key)) map.set(key, { key, label: sp.name, isSpecial: true });
+    }
+    // งวดใดๆ ที่ PO เคยผูกไว้จริง (เผื่อเป็นเดือนเก่ากว่าช่วง ±1 ด้านบน)
+    let hasUnspecified = false;
+    for (const po of allPos) {
+      if (!po.period) { hasUnspecified = true; continue; }
+      const key = periodKeyOf(po.period);
+      if (!map.has(key)) map.set(key, { key, label: periodLabel(po.period, specialPeriods), isSpecial: po.period.type === 'special' });
+    }
+    const options = Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label, 'th'));
+    if (hasUnspecified) options.push({ key: 'none', label: 'ไม่ระบุงวด', isSpecial: false });
+    return options;
   }, [allPos, specialPeriods]);
 
   const pos = periodFilter === 'all' ? allPos : allPos.filter((po) => periodKeyOf(po.period) === periodFilter);
