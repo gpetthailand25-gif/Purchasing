@@ -116,7 +116,9 @@ function explodeBOM(productId, requiredQty, asOfDate, repo, visitedPath = []) {
     const perUnitQty = detail.quantity / batchYieldQty;
     const neededQty = (requiredQty * perUnitQty / yieldFactor) * lossFactor;
     if (detail.componentType === 'RAW_MATERIAL' || detail.componentType === 'PACKAGING') {
-      results.push({ type: detail.componentType, id: detail.componentId, qty: neededQty, unit: detail.unit, source: { product: productId, bomDetailId: detail.bomDetailId, path: newPath } });
+      // ถ้าวัตถุดิบตัวนี้กำลังถูกสลับไปใช้ตัวทดแทนอยู่ ให้คำนวณ requirement/stock ไปที่ตัวทดแทนแทน
+      const resolvedId = repo.resolveMaterial ? repo.resolveMaterial(detail.componentId) : detail.componentId;
+      results.push({ type: detail.componentType, id: resolvedId, qty: neededQty, unit: detail.unit, source: { product: productId, bomDetailId: detail.bomDetailId, path: newPath } });
     } else if (detail.componentType === 'SEMI_FINISHED' || detail.componentType === 'WIP') {
       results.push({ type: detail.componentType, id: detail.componentId, qty: neededQty, unit: detail.unit, source: { product: productId, bomDetailId: detail.bomDetailId, path: newPath } });
       results.push(...explodeBOM(detail.componentId, neededQty, asOfDate, repo, newPath));
@@ -1028,12 +1030,21 @@ function createStore() {
   }
 
   function toEngineRepo(asOfDate) {
+    // วัตถุดิบทดแทน: ถ้าวัตถุดิบตัวใดถูก "สลับ" ไปใช้ตัวทดแทนอยู่ (activeSubstitute) ให้ explodeBOM
+    // (ดูฟังก์ชัน engine ด้านบนของไฟล์) เปลี่ยนไปคำนวณ requirement/stock/ราคา จากตัวทดแทนแทนตัวหลัก
+    // โดยอัตโนมัติทุก BOM ที่อ้างถึงตัวหลัก ไม่ต้องเข้าไปแก้ BOM ทีละสูตร
+    function resolveMaterial(id) {
+      const m = materials[id];
+      if (m && m.activeSubstitute && materials[m.activeSubstitute]) return m.activeSubstitute;
+      return id;
+    }
     return {
       getActiveBom(productId) {
         const bom = boms[productId];
         if (!bom || new Date(bom.effectiveDate) > new Date(asOfDate)) return null;
         return bom;
       },
+      resolveMaterial,
       // stock/safetyStock/MOQ ของวัตถุดิบถูกกรอก/นำเข้าเป็น "หน่วยซื้อ" (เช่น ลัง/ถุง/กระสอบ) เหมือน price
       // จึงต้องแปลงเป็น "หน่วยฐาน" ของ BOM (เช่น กรัม) ด้วย conversionRate ก่อนนำไปคำนวณร่วมกับ grossRequirement เสมอ
       getStock(type, id) {
@@ -1060,7 +1071,7 @@ function createStore() {
       getScheduledReceipt() { return 0; },
       getConversionRate(id) { return (materials[id] && materials[id].conversionRate) || 1; },
       getMoq(id) { return (materials[id] && Number(materials[id].moq)) || 0; },
-      getMaterialPrice(id) { return materialUnitCost(id); },
+      getMaterialPrice(id) { return materialUnitCost(resolveMaterial(id)); },
       getSemiFinishedChildren(productId) {
         const bom = boms[productId];
         if (!bom) return [];
@@ -1104,7 +1115,7 @@ function createStore() {
     return { productId, deleted: true };
   }
 
-  function createMaterial({ materialId, name, type, unit, price, safetyStock, conversionRate, purchaseUnit, moq, maxStock, shelfLifeMonths, supplierName, note, active }) {
+  function createMaterial({ materialId, name, type, unit, price, safetyStock, conversionRate, purchaseUnit, moq, maxStock, shelfLifeMonths, supplierName, note, active, substitutes }) {
     if (!name) throw new HttpError(400, 'ขาดข้อมูลที่จำเป็น: name');
     if (type !== 'RAW_MATERIAL' && type !== 'PACKAGING') throw new HttpError(400, 'type ต้องเป็น RAW_MATERIAL หรือ PACKAGING');
     if (!unit) throw new HttpError(400, 'ขาดข้อมูลที่จำเป็น: unit');
@@ -1121,11 +1132,16 @@ function createStore() {
       maxStock: (maxStock === undefined || maxStock === null || maxStock === '') ? null : Number(maxStock),
       shelfLifeMonths: (shelfLifeMonths === undefined || shelfLifeMonths === null || shelfLifeMonths === '') ? null : Number(shelfLifeMonths),
       supplierName: supplierName || null, note: note || null, active: active === undefined ? true : !!active,
+      // วัตถุดิบทดแทน: substitutes = รายชื่อรหัสวัตถุดิบที่ใช้แทนกันได้ (กำหนดไว้ล่วงหน้า)
+      // activeSubstitute = ถ้าตั้งค่าไว้ (ต้องเป็นหนึ่งใน substitutes) แปลว่าตอนนี้ "สลับ" ไปใช้ตัวทดแทนนี้แทนตัวหลักแล้ว
+      // ทุก BOM ที่อ้างถึงวัตถุดิบตัวหลักจะคำนวณ MRP ไปที่ตัวทดแทนโดยอัตโนมัติ โดยไม่ต้องแก้ BOM ทีละสูตร
+      substitutes: Array.isArray(substitutes) ? substitutes.filter((s) => s && s !== id) : [],
+      activeSubstitute: null,
     };
     return { materialId: id, ...materials[id] };
   }
 
-  function updateMaterial(materialId, { name, type, unit, price, safetyStock, conversionRate, purchaseUnit, moq, maxStock, shelfLifeMonths, supplierName, note, active }) {
+  function updateMaterial(materialId, { name, type, unit, price, safetyStock, conversionRate, purchaseUnit, moq, maxStock, shelfLifeMonths, supplierName, note, active, substitutes }) {
     const m = materials[materialId];
     if (!m) throw new HttpError(404, 'ไม่พบรหัส: ' + materialId);
     if (type !== undefined && type !== 'RAW_MATERIAL' && type !== 'PACKAGING') throw new HttpError(400, 'type ต้องเป็น RAW_MATERIAL หรือ PACKAGING');
@@ -1142,6 +1158,22 @@ function createStore() {
     if (supplierName !== undefined) m.supplierName = supplierName || null;
     if (note !== undefined) m.note = note || null;
     if (active !== undefined) m.active = !!active;
+    if (substitutes !== undefined) {
+      m.substitutes = Array.isArray(substitutes) ? substitutes.filter((s) => s && s !== materialId) : [];
+      // ถ้าตัวที่กำลังสลับไปใช้อยู่ถูกเอาออกจากรายการทดแทนแล้ว ให้สลับกลับมาใช้ตัวหลักอัตโนมัติ
+      if (m.activeSubstitute && !m.substitutes.includes(m.activeSubstitute)) m.activeSubstitute = null;
+    }
+    return { materialId, ...m };
+  }
+
+  function setActiveSubstitute(materialId, substituteId) {
+    const m = materials[materialId];
+    if (!m) throw new HttpError(404, 'ไม่พบรหัส: ' + materialId);
+    if (substituteId) {
+      if (!materials[substituteId]) throw new HttpError(404, 'ไม่พบรหัสวัตถุดิบทดแทน: ' + substituteId);
+      if (!(m.substitutes || []).includes(substituteId)) throw new HttpError(400, 'รายการนี้ไม่ได้ถูกกำหนดเป็นวัตถุดิบทดแทนของ ' + materialId);
+    }
+    m.activeSubstitute = substituteId || null;
     return { materialId, ...m };
   }
 
@@ -1155,6 +1187,11 @@ function createStore() {
     if (usedIn.length > 0) {
       const names = usedIn.map((u) => u.productName).join(', ');
       throw new HttpError(400, 'ลบไม่ได้ เพราะรายการนี้ถูกใช้อยู่ใน BOM ของ: ' + names + ' — กรุณาลบออกจาก BOM เหล่านั้นก่อน');
+    }
+    const referencedBy = Object.entries(materials).filter(([id, m]) => id !== materialId && (m.substitutes || []).includes(materialId));
+    if (referencedBy.length > 0) {
+      const names = referencedBy.map(([, m]) => m.name).join(', ');
+      throw new HttpError(400, 'ลบไม่ได้ เพราะรายการนี้ถูกตั้งเป็นวัตถุดิบทดแทนของ: ' + names + ' — กรุณาเอาออกจากรายการทดแทนก่อน');
     }
     delete materials[materialId];
     return { materialId, deleted: true };
@@ -1736,7 +1773,7 @@ function createStore() {
 
   return {
     products, materials, suppliers, stock, boms,
-    createProduct, updateProduct, deleteProduct, createMaterial, updateMaterial, deleteMaterial,
+    createProduct, updateProduct, deleteProduct, createMaterial, updateMaterial, deleteMaterial, setActiveSubstitute,
     upsertForecast, addForecastAdjustment, listForecast, deleteForecast, removeForecastAdjustment, updateForecastWeeklyActual, calculateMrpForPeriod,
     createSpecialPeriod, listSpecialPeriods, deleteSpecialPeriod, upsertSpecialForecast, listSpecialForecast, deleteSpecialForecast, calculateMrpForSpecialPeriod,
     getBomTree, whereUsed, addBomDetail, removeBomDetail, updateBomDetail, updateBomHeader,
@@ -1749,7 +1786,7 @@ function createStore() {
   };
 }
 
-const MUTATORS = ['createProduct', 'updateProduct', 'deleteProduct', 'createMaterial', 'updateMaterial', 'deleteMaterial', 'addBomDetail', 'removeBomDetail', 'updateBomDetail', 'updateBomHeader', 'upsertForecast', 'addForecastAdjustment', 'deleteForecast', 'removeForecastAdjustment', 'updateForecastWeeklyActual', 'createSpecialPeriod', 'deleteSpecialPeriod', 'upsertSpecialForecast', 'deleteSpecialForecast', 'createPurchaseOrder', 'receiveGoods', 'updatePurchaseOrder', 'deletePurchaseOrder', 'logActualOrder', 'updateActualOrderLog', 'deleteActualOrderLog', 'linkActualOrderToPo', 'importStock'];
+const MUTATORS = ['createProduct', 'updateProduct', 'deleteProduct', 'createMaterial', 'updateMaterial', 'deleteMaterial', 'setActiveSubstitute', 'addBomDetail', 'removeBomDetail', 'updateBomDetail', 'updateBomHeader', 'upsertForecast', 'addForecastAdjustment', 'deleteForecast', 'removeForecastAdjustment', 'updateForecastWeeklyActual', 'createSpecialPeriod', 'deleteSpecialPeriod', 'upsertSpecialForecast', 'deleteSpecialForecast', 'createPurchaseOrder', 'receiveGoods', 'updatePurchaseOrder', 'deletePurchaseOrder', 'logActualOrder', 'updateActualOrderLog', 'deleteActualOrderLog', 'linkActualOrderToPo', 'importStock'];
 
 /* ============================================================================
    PERSISTENCE — Firestore (client-side, ดู FIREBASE_CONFIG ด้านบนสุดของไฟล์)
@@ -1885,6 +1922,7 @@ const ICONS = {
   upload: <><path d="M12 21V9" /><polyline points="7 13 12 8 17 13" /><path d="M4 19h16" /></>,
   printer: <><polyline points="6 9 6 3 18 3 18 9" /><rect x="4" y="9" width="16" height="8" rx="1" /><rect x="7" y="14" width="10" height="7" /></>,
   star: <polygon points="12 2 15 9 22.5 9.5 17 14.5 18.5 22 12 18 5.5 22 7 14.5 1.5 9.5 9 9" />,
+  repeat: <><path d="M17 2 21 6 17 10" /><path d="M3 6h18" /><path d="M7 22 3 18 7 14" /><path d="M21 18H3" /></>,
 };
 
 function Icon({ name, size = 16, className = '' }) {
@@ -3858,7 +3896,7 @@ function BomMaster({ productId, products, materials, store, refresh }) {
   );
 }
 
-function BomTreeNode({ node, depth = 0, hideBatchInfo = false }) {
+function BomTreeNode({ node, depth = 0, hideBatchInfo = false, materials = {} }) {
   if (!node) return null;
   return (
     <div style={{ marginLeft: depth * 20 }}>
@@ -3869,12 +3907,23 @@ function BomTreeNode({ node, depth = 0, hideBatchInfo = false }) {
         {!hideBatchInfo && <span className="text-[11px] text-slate-400">Loss {fmt(node.lossPct ?? 0)}% · Yield {fmt(node.yieldPct ?? 100)}% · ผลิตได้/Batch {fmt(node.batchYieldQty ?? 1)} {node.batchYieldUnit ?? 'ชิ้น'}</span>}
         {hideBatchInfo && <span className="text-xs text-slate-400">หน่วย: {node.batchYieldUnit ?? 'ชิ้น'}</span>}
       </div>
-      {node.components.map((c) => (
-        <div key={c.bomDetailId} style={{ marginLeft: (depth + 1) * 20 }} className="border-l-2 border-slate-100 py-1 pl-3">
-          <div className="flex items-center gap-2 text-sm"><TypeTag type={c.componentType} /><span className="text-xs tabular text-slate-400">{c.componentId}</span><span className="text-slate-700">{c.name}</span><span className="tabular text-xs text-slate-400">{fmt(c.quantity)} {c.unit}</span></div>
-          {c.children && <BomTreeNode node={c.children} depth={depth + 2} />}
-        </div>
-      ))}
+      {node.components.map((c) => {
+        const mat = materials[c.componentId];
+        const activeSub = mat && mat.activeSubstitute && materials[mat.activeSubstitute];
+        return (
+          <div key={c.bomDetailId} style={{ marginLeft: (depth + 1) * 20 }} className="border-l-2 border-slate-100 py-1 pl-3">
+            <div className="flex items-center gap-2 text-sm">
+              <TypeTag type={c.componentType} /><span className="text-xs tabular text-slate-400">{c.componentId}</span><span className="text-slate-700">{c.name}</span><span className="tabular text-xs text-slate-400">{fmt(c.quantity)} {c.unit}</span>
+              {activeSub && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700 ring-1 ring-inset ring-amber-200">
+                  <Icon name="repeat" size={10} /> MRP กำลังใช้ทดแทน: {activeSub.name}
+                </span>
+              )}
+            </div>
+            {c.children && <BomTreeNode node={c.children} depth={depth + 2} materials={materials} />}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -3882,7 +3931,7 @@ function BomTreeNode({ node, depth = 0, hideBatchInfo = false }) {
 function BomTreeView({ productId, productType, store }) {
   const tree = store.getBomTree(productId, TODAY);
   if (!tree) return <div className="rounded-xl border border-dashed border-slate-200 bg-white p-8 text-center text-sm text-slate-400">ยังไม่มี BOM สำหรับสินค้านี้</div>;
-  return <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><BomTreeNode node={tree} hideBatchInfo={productType === 'FINISHED'} /></div>;
+  return <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><BomTreeNode node={tree} hideBatchInfo={productType === 'FINISHED'} materials={store.materials} /></div>;
 }
 
 function WhereUsed({ productId, productType, products, store, jumpTo }) {
@@ -3920,6 +3969,9 @@ function MaterialsTab({ store, refresh }) {
   const [editForm, setEditForm] = useState(null);
   const [editError, setEditError] = useState(null);
   const [rowError, setRowError] = useState(null);
+  const [subPanelId, setSubPanelId] = useState(null);
+  const [subAddId, setSubAddId] = useState('');
+  const [subError, setSubError] = useState(null);
   const [stockImportBusy, setStockImportBusy] = useState(false);
   const [stockImportResult, setStockImportResult] = useState(null);
   const fileInputRef = useRef(null);
@@ -4004,6 +4056,39 @@ function MaterialsTab({ store, refresh }) {
     try { store.deleteMaterial(id); refresh(); } catch (e) { setRowError({ id, message: e.message }); }
   }
 
+  function openSubPanel(id) {
+    setSubPanelId(subPanelId === id ? null : id);
+    setSubAddId(''); setSubError(null);
+  }
+
+  function addSubstitute(id) {
+    if (!subAddId) return;
+    setSubError(null);
+    try {
+      const current = materials[id].substitutes || [];
+      store.updateMaterial(id, { substitutes: [...current, subAddId] });
+      doSaveNow(); refresh();
+      setSubAddId('');
+    } catch (e) { setSubError(e.message); }
+  }
+
+  function removeSubstitute(id, subId) {
+    setSubError(null);
+    try {
+      const current = materials[id].substitutes || [];
+      store.updateMaterial(id, { substitutes: current.filter((s) => s !== subId) });
+      doSaveNow(); refresh();
+    } catch (e) { setSubError(e.message); }
+  }
+
+  function switchActiveSubstitute(id, subId) {
+    setSubError(null);
+    try {
+      store.setActiveSubstitute(id, subId);
+      doSaveNow(); refresh();
+    } catch (e) { setSubError(e.message); }
+  }
+
   const filtered = Object.entries(materials)
     .filter(([id, m]) => search === '' || m.name.includes(search) || id.includes(search))
     .sort(([idA], [idB]) => idA.localeCompare(idB, undefined, { numeric: true, sensitivity: 'base' }));
@@ -4078,14 +4163,28 @@ function MaterialsTab({ store, refresh }) {
                     <td className="px-4 py-3 font-mono text-xs text-slate-500">{id}</td>
                     {!isEditing && (
                       <>
-                        <td className="px-4 py-3 font-medium text-slate-800">{m.name}</td>
+                        <td className="px-4 py-3 font-medium text-slate-800">
+                          {m.name}
+                          {m.activeSubstitute && materials[m.activeSubstitute] && (
+                            <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700 ring-1 ring-inset ring-amber-200">
+                              <Icon name="repeat" size={10} /> กำลังใช้ทดแทน: {materials[m.activeSubstitute].name}
+                            </div>
+                          )}
+                        </td>
                         <td className="px-4 py-3"><TypeTag type={m.type} /></td>
                         <td className="px-4 py-3 text-slate-500">{m.unit}</td>
                         <td className="px-4 py-3 text-slate-500 tabular">{fmt(m.conversionRate ?? 1)} {m.unit} / {m.purchaseUnit || m.unit}</td>
                         <td className="px-4 py-3 text-right tabular text-slate-700">{fmt(m.price)}</td>
                         <td className="px-4 py-3 text-right tabular text-slate-700">{fmt(store.stock[id] || 0)} <span className="text-slate-400">{m.purchaseUnit || m.unit}</span></td>
                         <td className="px-4 py-3">{m.active === false ? <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500">ปิดใช้งาน</span> : <span className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">ใช้งาน</span>}</td>
-                        <td className="px-4 py-3"><div className="flex items-center justify-end gap-2"><button onClick={() => startEdit(id, m)} title="แก้ไข" className="text-slate-400 hover:text-slate-600"><Icon name="pencil" size={14} /></button><button onClick={() => handleDelete(id)} title="ลบ" className="text-slate-300 hover:text-red-500"><Icon name="trash" size={14} /></button></div></td>
+                        <td className="px-4 py-3"><div className="flex items-center justify-end gap-2">
+                          <button onClick={() => openSubPanel(id)} title="วัตถุดิบทดแทน" className={`relative text-slate-400 hover:text-amber-600 ${subPanelId === id ? 'text-amber-600' : ''}`}>
+                            <Icon name="repeat" size={14} />
+                            {(m.substitutes || []).length > 0 && <span className="absolute -right-1.5 -top-1.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-amber-600 text-[9px] font-bold text-white">{m.substitutes.length}</span>}
+                          </button>
+                          <button onClick={() => startEdit(id, m)} title="แก้ไข" className="text-slate-400 hover:text-slate-600"><Icon name="pencil" size={14} /></button>
+                          <button onClick={() => handleDelete(id)} title="ลบ" className="text-slate-300 hover:text-red-500"><Icon name="trash" size={14} /></button>
+                        </div></td>
                       </>
                     )}
                     {isEditing && (
@@ -4121,6 +4220,42 @@ function MaterialsTab({ store, refresh }) {
                       </td>
                     )}
                   </tr>
+                  {subPanelId === id && (
+                    <tr className="border-b border-slate-50 bg-amber-50/30">
+                      <td colSpan={9} className="px-4 py-3">
+                        <div className="rounded-lg border border-amber-200 bg-white p-3">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-amber-700">วัตถุดิบทดแทนของ "{m.name}"</p>
+                          <p className="mt-1 text-xs text-slate-400">กำหนดรายการที่ใช้แทนกันได้ไว้ล่วงหน้า เวลา Supplier ส่งของหลักไม่ได้ กดสลับไปใช้ตัวทดแทนได้ทันที ทุก BOM ที่อ้างถึง "{m.name}" จะคำนวณ MRP ไปที่ตัวทดแทนโดยอัตโนมัติ โดยไม่ต้องแก้ BOM ทีละสูตร</p>
+
+                          <div className="mt-3 flex flex-wrap items-center gap-2">
+                            <button onClick={() => switchActiveSubstitute(id, null)} className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition ${!m.activeSubstitute ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                              <Icon name="check" size={11} /> ใช้ตัวหลัก ({m.name})
+                            </button>
+                            {(m.substitutes || []).map((subId) => {
+                              const sub = materials[subId];
+                              if (!sub) return null;
+                              const isActive = m.activeSubstitute === subId;
+                              return (
+                                <div key={subId} className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium ${isActive ? 'bg-amber-600 text-white' : 'bg-slate-100 text-slate-600'}`}>
+                                  <button onClick={() => switchActiveSubstitute(id, subId)} className="inline-flex items-center gap-1.5">
+                                    {isActive && <Icon name="check" size={11} />} {sub.name}
+                                  </button>
+                                  <button onClick={() => removeSubstitute(id, subId)} title="เอาออกจากรายการทดแทน" className={isActive ? 'text-amber-100 hover:text-white' : 'text-slate-400 hover:text-red-500'}><Icon name="x" size={11} /></button>
+                                </div>
+                              );
+                            })}
+                            {(m.substitutes || []).length === 0 && <span className="text-xs text-slate-400">ยังไม่มีวัตถุดิบทดแทนที่กำหนดไว้</span>}
+                          </div>
+
+                          <div className="mt-3 flex items-center gap-2">
+                            <div className="w-64"><SearchableSelect options={Object.entries(materials).filter(([mid]) => mid !== id && !(m.substitutes || []).includes(mid)).map(([mid, mm]) => [mid, `${mid} — ${mm.name}`])} value={subAddId} onChange={setSubAddId} placeholder="พิมพ์ค้นหาวัตถุดิบที่จะเพิ่มเป็นตัวทดแทน..." /></div>
+                            <button onClick={() => addSubstitute(id)} disabled={!subAddId} className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700 disabled:opacity-40"><Icon name="plus" size={12} /> เพิ่มเป็นตัวทดแทน</button>
+                          </div>
+                          {subError && <p className="mt-2 text-[11px] text-red-600">{subError}</p>}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
                   {rowError?.id === id && <tr className="border-b border-slate-50"><td colSpan={9} className="px-4 pb-2 pt-0"><p className="text-[11px] text-red-600">{rowError.message}</p></td></tr>}
                 </Fragment>
               );
