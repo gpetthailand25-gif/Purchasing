@@ -1717,10 +1717,16 @@ function createStore() {
   }
 
   let stockUpdatedAt = null;
+  const stockHistory = []; // { date: 'YYYY-MM-DD', materialId, qty } — บันทึกทุกครั้งที่สต็อกของวัตถุดิบถูกอัพเดต
+
+  function recordStockHistory(materialId, qty, date) {
+    stockHistory.push({ date, materialId, qty });
+  }
 
   function importStock(rows) {
     let updated = 0;
     const notFound = [];
+    const today = new Date().toISOString().slice(0, 10);
     for (const r of rows) {
       const rawId = String(r.materialId ?? '').trim();
       if (!rawId) continue;
@@ -1729,6 +1735,7 @@ function createStore() {
       if (!materials[id]) { notFound.push(rawId); continue; }
       if (Number.isNaN(qty)) continue;
       stock[id] = qty;
+      recordStockHistory(id, qty, today);
       updated++;
     }
     stockUpdatedAt = new Date().toISOString();
@@ -1737,6 +1744,25 @@ function createStore() {
 
   function getStockInfo() {
     return { stock: { ...stock }, stockUpdatedAt };
+  }
+
+  function getStockAsOf(materialId, asOfDate) {
+    // หา entry ล่าสุดที่ <= asOfDate จากประวัติสต็อกของวัตถุดิบนี้ ถ้าไม่มีเลย (ก่อนเริ่มเก็บประวัติ) จะคืนค่า null
+    let best = null;
+    for (const h of stockHistory) {
+      if (h.materialId !== materialId) continue;
+      if (h.date > asOfDate) continue;
+      if (!best || h.date >= best.date) best = h;
+    }
+    return best ? best.qty : null;
+  }
+
+  function listStockAsOf(asOfDate) {
+    const today = new Date().toISOString().slice(0, 10);
+    if (asOfDate >= today) return { ...stock }; // ปัจจุบัน/อนาคต ให้ใช้สต็อกสดเสมอ
+    const result = {};
+    for (const id of Object.keys(materials)) result[id] = getStockAsOf(id, asOfDate);
+    return result;
   }
 
   function listOrphanStock() {
@@ -1759,7 +1785,7 @@ function createStore() {
       forecasts: Array.from(forecasts.entries()).map(([key, value]) => ({ key, value })),
       specialPeriods, nextSpecialId,
       purchaseOrders, priceHistory, actualOrderLogs,
-      nextPoId, nextBomDetailId, nextLogId, stockUpdatedAt,
+      nextPoId, nextBomDetailId, nextLogId, stockUpdatedAt, stockHistory,
     };
   }
 
@@ -1780,6 +1806,15 @@ function createStore() {
     if (typeof data.nextLogId === 'number') nextLogId = data.nextLogId;
     if (typeof data.nextSpecialId === 'number') nextSpecialId = data.nextSpecialId;
     if (typeof data.stockUpdatedAt === 'string') stockUpdatedAt = data.stockUpdatedAt;
+    if (Array.isArray(data.stockHistory)) {
+      stockHistory.length = 0;
+      stockHistory.push(...data.stockHistory);
+    } else if (stockUpdatedAt && Object.keys(stock).length > 0) {
+      // migration: ข้อมูลเก่าก่อนมีระบบเก็บประวัติสต็อก — สร้าง entry ตั้งต้นจากค่าปัจจุบัน
+      // โดยใช้วันที่อัพเดตล่าสุดที่มีอยู่ เพื่อให้อย่างน้อยดูย้อนหลังไปถึงจุดนั้นได้
+      const backfillDate = stockUpdatedAt.slice(0, 10);
+      for (const [id, qty] of Object.entries(stock)) recordStockHistory(id, qty, backfillDate);
+    }
   }
 
   return {
@@ -1792,7 +1827,7 @@ function createStore() {
     logActualOrder, listActualOrderLogs, updateActualOrderLog, deleteActualOrderLog, linkActualOrderToPo,
     getMrpMonthSummary,
     getDashboardPurchasing, getDashboardExecutive,
-    importStock, getStockInfo, listOrphanStock, pruneOrphanStock,
+    importStock, getStockInfo, listOrphanStock, pruneOrphanStock, getStockAsOf, listStockAsOf,
     snapshot, hydrate,
   };
 }
@@ -3470,7 +3505,7 @@ function BomTab({ store, refresh }) {
                 <select value={newProductType} onChange={(e) => setNewProductType(e.target.value)} className="w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
                   <option value="FINISHED">Finished Product</option>
                   <option value="SEMI_FINISHED">Semi-Finished</option>
-                  <option value="WIP">WIP-Finished</option>
+                  <option value="WIP">WIP Product</option>
                 </select>
                 <input value={newProductId} onChange={(e) => setNewProductId(e.target.value)} placeholder="รหัสสินค้า (ไม่กรอก = สร้างอัตโนมัติ)" className="mt-2 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
                 <input value={newProductName} onChange={(e) => setNewProductName(e.target.value)} placeholder="ชื่อสินค้า" className="mt-2 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
@@ -3498,7 +3533,7 @@ function BomTab({ store, refresh }) {
               </button>
             ))}
           </div>
-          <p className="mb-1.5 mt-4 px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">WIP-Finished</p>
+          <p className="mb-1.5 mt-4 px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">WIP Product</p>
           <div className="space-y-1">
             {filtered.filter(([, p]) => p.type === 'WIP').map(([id, p]) => (
               <button key={id} onClick={() => { setSelectedProduct(id); setTab('master'); }} className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition ${selectedProduct === id ? 'bg-slate-900 font-medium text-white' : 'text-slate-600 hover:bg-slate-100'}`}>
@@ -3532,7 +3567,7 @@ function BomTab({ store, refresh }) {
                       <select value={productDraft.type} onChange={(e) => setProductDraft((d) => ({ ...d, type: e.target.value }))} className="mt-1 block rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
                         <option value="FINISHED">Finished Product</option>
                         <option value="SEMI_FINISHED">Semi-Finished</option>
-                        <option value="WIP">WIP-Finished</option>
+                        <option value="WIP">WIP Product</option>
                       </select>
                     </div>
                     {productEditError && <p className="text-xs text-red-600">{productEditError}</p>}
@@ -3974,6 +4009,7 @@ function MaterialsTab({ store, refresh }) {
   const materials = store.materials;
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [stockPeriod, setStockPeriod] = useState('current');
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState(EMPTY_MATERIAL_FORM);
   const [formError, setFormError] = useState(null);
@@ -4101,6 +4137,23 @@ function MaterialsTab({ store, refresh }) {
     } catch (e) { setSubError(e.message); }
   }
 
+  const stockPeriodOptions = useMemo(() => {
+    const now = new Date();
+    const opts = [];
+    for (let i = 0; i < 12; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      opts.push({ value: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`, label: `${THAI_MONTHS[d.getMonth()]} ${d.getFullYear()}` });
+    }
+    return opts;
+  }, []);
+
+  const stockAsOfDate = stockPeriod === 'current' ? null : (() => {
+    const [y, mo] = stockPeriod.split('-').map(Number);
+    return `${y}-${String(mo).padStart(2, '0')}-${String(new Date(y, mo, 0).getDate()).padStart(2, '0')}`;
+  })();
+  const stockMap = stockAsOfDate ? store.listStockAsOf(stockAsOfDate) : null;
+  function stockValueFor(id) { return stockMap ? stockMap[id] : (store.stock[id] || 0); }
+
   const filtered = Object.entries(materials)
     .filter(([id, m]) => search === '' || m.name.includes(search) || id.includes(search))
     .filter(([, m]) => statusFilter === 'all' || (statusFilter === 'active' ? m.active !== false : m.active === false))
@@ -4115,7 +4168,7 @@ function MaterialsTab({ store, refresh }) {
       'หน่วยที่ซื้อ': m.purchaseUnit || m.unit,
       'อัตราแปลง (ต่อ 1 หน่วยซื้อ)': m.conversionRate ?? 1,
       'ราคา/หน่วย (BOM)': m.price ?? 0,
-      'สต็อกคงเหลือ (หน่วยซื้อ)': store.stock[id] || 0,
+      [`สต็อกคงเหลือ (หน่วยซื้อ)${stockAsOfDate ? ` — ณ ${stockPeriodOptions.find((o) => o.value === stockPeriod)?.label}` : ' — ปัจจุบัน'}`]: stockValueFor(id) ?? 'ไม่มีข้อมูล',
       'Safety Stock': m.safetyStock ?? 0,
       'MOQ (หน่วยซื้อ)': m.moq ?? '',
       'Max Stock': m.maxStock ?? '',
@@ -4155,6 +4208,10 @@ function MaterialsTab({ store, refresh }) {
             <option value="active">ใช้งานอยู่</option>
             <option value="inactive">ปิดใช้งาน</option>
           </select>
+          <select value={stockPeriod} onChange={(e) => setStockPeriod(e.target.value)} title="ดูสต็อกคงเหลือ ณ งวดที่เลือก" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
+            <option value="current">สต็อก: ปัจจุบัน</option>
+            {stockPeriodOptions.map((o) => <option key={o.value} value={o.value}>สต็อก ณ {o.label}</option>)}
+          </select>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button onClick={exportToExcel} disabled={filtered.length === 0} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">
@@ -4167,6 +4224,11 @@ function MaterialsTab({ store, refresh }) {
           {!adding && <button onClick={() => { setAdding(true); setFormError(null); }} className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-2 text-xs font-medium text-white hover:bg-slate-700"><Icon name="plus" size={14} /> เพิ่มรายการใหม่</button>}
         </div>
       </div>
+      {stockAsOfDate && (
+        <div className="mt-3 rounded-lg bg-sky-50 px-3 py-2 text-xs text-sky-700">
+          กำลังดูสต็อกย้อนหลัง ณ สิ้น{stockPeriodOptions.find((o) => o.value === stockPeriod)?.label} — คำนวณจากประวัติการอัพเดตสต็อกจริง (ทุกครั้งที่ "อัพโหลดสต็อก") รายการที่ขึ้น "ไม่มีข้อมูล" หมายถึงยังไม่เคยมีการบันทึกสต็อกของรายการนั้นก่อนหรือในช่วงเวลานั้น
+        </div>
+      )}
       {orphanStock.length > 0 && (
         <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
           <span>
@@ -4219,7 +4281,7 @@ function MaterialsTab({ store, refresh }) {
       )}
       <div className="mt-4 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
-          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">รหัส</th><th className="px-4 py-3">รายการ</th><th className="px-4 py-3">ประเภท</th><th className="px-4 py-3">หน่วย BOM</th><th className="px-4 py-3">หน่วยซื้อ / อัตราแปลง</th><th className="px-4 py-3 text-right">ราคา/หน่วย</th><th className="px-4 py-3 text-right">สต็อกคงเหลือ</th><th className="px-4 py-3">สถานะ</th><th className="px-4 py-3"></th></tr></thead>
+          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">รหัส</th><th className="px-4 py-3">รายการ</th><th className="px-4 py-3">ประเภท</th><th className="px-4 py-3">หน่วย BOM</th><th className="px-4 py-3">หน่วยซื้อ / อัตราแปลง</th><th className="px-4 py-3 text-right">ราคา/หน่วย</th><th className="px-4 py-3 text-right">สต็อกคงเหลือ{stockAsOfDate ? ` (ณ ${stockPeriodOptions.find((o) => o.value === stockPeriod)?.label})` : ''}</th><th className="px-4 py-3">สถานะ</th><th className="px-4 py-3"></th></tr></thead>
           <tbody>
             {filtered.map(([id, m]) => {
               const isEditing = editingId === id;
@@ -4241,7 +4303,9 @@ function MaterialsTab({ store, refresh }) {
                         <td className="px-4 py-3 text-slate-500">{m.unit}</td>
                         <td className="px-4 py-3 text-slate-500 tabular">{fmt(m.conversionRate ?? 1)} {m.unit} / {m.purchaseUnit || m.unit}</td>
                         <td className="px-4 py-3 text-right tabular text-slate-700">{fmt(m.price)}</td>
-                        <td className="px-4 py-3 text-right tabular text-slate-700">{fmt(store.stock[id] || 0)} <span className="text-slate-400">{m.purchaseUnit || m.unit}</span></td>
+                        <td className="px-4 py-3 text-right tabular text-slate-700">
+                          {(() => { const v = stockValueFor(id); return v === null ? <span className="text-xs italic text-slate-300">ไม่มีข้อมูล</span> : <>{fmt(v)} <span className="text-slate-400">{m.purchaseUnit || m.unit}</span></>; })()}
+                        </td>
                         <td className="px-4 py-3">{m.active === false ? <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500">ปิดใช้งาน</span> : <span className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">ใช้งาน</span>}</td>
                         <td className="px-4 py-3"><div className="flex items-center justify-end gap-2">
                           <button onClick={() => openSubPanel(id)} title="วัตถุดิบทดแทน" className={`relative text-slate-400 hover:text-amber-600 ${subPanelId === id ? 'text-amber-600' : ''}`}>
