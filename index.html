@@ -999,7 +999,7 @@ function createStore() {
     "Z-0473": {"name": "พริกไทยป่น 500กรัม", "type": "RAW_MATERIAL", "unit": "กรัม", "price": 99.0, "safetyStock": 0, "conversionRate": 500.0, "purchaseUnit": "ถุง", "moq": null, "maxStock": null, "shelfLifeMonths": null, "supplierName": "ซีพี แอ็กซ์ตร้า สาขาศาลายา", "note": null, "active": true},
   };
 
-  const stock = { M001: 0, M002: 0, M003: 0, M004: 0, M005: 0, M006: 0, M007: 0, M008: 0, M009: 0, M010: 0, P003: 0 };
+  const stock = { M001: 100, M002: 500, M003: 50, M004: 30, M005: 300, M006: 2000, M007: 200, M008: 200, M009: 150, M010: 150, P003: 0 };
 
   const suppliers = {
     'SUP-A': { name: 'บริษัท ไทยเฟลาว์ จำกัด', leadTimeDays: 5 },
@@ -1739,6 +1739,17 @@ function createStore() {
     return { stock: { ...stock }, stockUpdatedAt };
   }
 
+  function listOrphanStock() {
+    // รายการ stock ที่ไม่มีวัตถุดิบ/สินค้าตัวไหนในระบบอ้างถึงแล้ว (เช่น ข้อมูลตัวอย่าง/เดโมเก่าที่หลงเหลืออยู่)
+    return Object.entries(stock).filter(([id]) => !materials[id] && !products[id]).map(([id, qty]) => ({ id, qty }));
+  }
+
+  function pruneOrphanStock() {
+    const removed = listOrphanStock();
+    for (const { id } of removed) delete stock[id];
+    return { removed };
+  }
+
   function snapshot() {
     // หมายเหตุ: ส่ง reference ตรงๆ โดยไม่ deep-clone ผ่าน JSON.stringify/parse เพราะ Firestore
     // SDK จัดการ serialize ให้เองอยู่แล้ว การ clone ซ้ำเป็นภาระ CPU ที่ไม่จำเป็นและจะช้าขึ้นเรื่อยๆ
@@ -1781,12 +1792,12 @@ function createStore() {
     logActualOrder, listActualOrderLogs, updateActualOrderLog, deleteActualOrderLog, linkActualOrderToPo,
     getMrpMonthSummary,
     getDashboardPurchasing, getDashboardExecutive,
-    importStock, getStockInfo,
+    importStock, getStockInfo, listOrphanStock, pruneOrphanStock,
     snapshot, hydrate,
   };
 }
 
-const MUTATORS = ['createProduct', 'updateProduct', 'deleteProduct', 'createMaterial', 'updateMaterial', 'deleteMaterial', 'setActiveSubstitute', 'addBomDetail', 'removeBomDetail', 'updateBomDetail', 'updateBomHeader', 'upsertForecast', 'addForecastAdjustment', 'deleteForecast', 'removeForecastAdjustment', 'updateForecastWeeklyActual', 'createSpecialPeriod', 'deleteSpecialPeriod', 'upsertSpecialForecast', 'deleteSpecialForecast', 'createPurchaseOrder', 'receiveGoods', 'updatePurchaseOrder', 'deletePurchaseOrder', 'logActualOrder', 'updateActualOrderLog', 'deleteActualOrderLog', 'linkActualOrderToPo', 'importStock'];
+const MUTATORS = ['createProduct', 'updateProduct', 'deleteProduct', 'createMaterial', 'updateMaterial', 'deleteMaterial', 'setActiveSubstitute', 'addBomDetail', 'removeBomDetail', 'updateBomDetail', 'updateBomHeader', 'upsertForecast', 'addForecastAdjustment', 'deleteForecast', 'removeForecastAdjustment', 'updateForecastWeeklyActual', 'createSpecialPeriod', 'deleteSpecialPeriod', 'upsertSpecialForecast', 'deleteSpecialForecast', 'createPurchaseOrder', 'receiveGoods', 'updatePurchaseOrder', 'deletePurchaseOrder', 'logActualOrder', 'updateActualOrderLog', 'deleteActualOrderLog', 'linkActualOrderToPo', 'importStock', 'pruneOrphanStock'];
 
 /* ============================================================================
    PERSISTENCE — Firestore (client-side, ดู FIREBASE_CONFIG ด้านบนสุดของไฟล์)
@@ -3962,6 +3973,7 @@ const EMPTY_MATERIAL_FORM = { materialId: '', name: '', type: 'RAW_MATERIAL', un
 function MaterialsTab({ store, refresh }) {
   const materials = store.materials;
   const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState(EMPTY_MATERIAL_FORM);
   const [formError, setFormError] = useState(null);
@@ -4091,17 +4103,63 @@ function MaterialsTab({ store, refresh }) {
 
   const filtered = Object.entries(materials)
     .filter(([id, m]) => search === '' || m.name.includes(search) || id.includes(search))
+    .filter(([, m]) => statusFilter === 'all' || (statusFilter === 'active' ? m.active !== false : m.active === false))
     .sort(([idA], [idB]) => idA.localeCompare(idB, undefined, { numeric: true, sensitivity: 'base' }));
+
+  function exportToExcel() {
+    const rows = filtered.map(([id, m]) => ({
+      'รหัส': id,
+      'รายการ': m.name,
+      'ประเภท': m.type === 'PACKAGING' ? 'บรรจุภัณฑ์' : 'วัตถุดิบ',
+      'หน่วย (BOM)': m.unit,
+      'หน่วยที่ซื้อ': m.purchaseUnit || m.unit,
+      'อัตราแปลง (ต่อ 1 หน่วยซื้อ)': m.conversionRate ?? 1,
+      'ราคา/หน่วย (BOM)': m.price ?? 0,
+      'สต็อกคงเหลือ (หน่วยซื้อ)': store.stock[id] || 0,
+      'Safety Stock': m.safetyStock ?? 0,
+      'MOQ (หน่วยซื้อ)': m.moq ?? '',
+      'Max Stock': m.maxStock ?? '',
+      'อายุสินค้า (เดือน)': m.shelfLifeMonths ?? '',
+      'Supplier': m.supplierName || '',
+      'สถานะ': m.active === false ? 'ปิดใช้งาน' : 'ใช้งาน',
+      'วัตถุดิบทดแทน': (m.substitutes || []).map((s) => materials[s]?.name || s).join(', '),
+      'กำลังใช้ทดแทนอยู่': m.activeSubstitute ? (materials[m.activeSubstitute]?.name || m.activeSubstitute) : '',
+      'Note': m.note || '',
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws['!cols'] = Object.keys(rows[0] || {}).map((k) => ({ wch: Math.max(12, k.length + 2) }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Materials');
+    XLSX.writeFile(wb, `Materials_Master_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  }
+
+  const orphanStock = store.listOrphanStock();
+  function handlePruneOrphanStock() {
+    if (!window.confirm(`ยืนยันล้างข้อมูลสต็อกของรหัสที่ไม่มีวัตถุดิบ/สินค้าในระบบแล้ว ${orphanStock.length} รายการ (${orphanStock.map((o) => o.id).join(', ')})? การลบนี้ย้อนกลับไม่ได้`)) return;
+    store.pruneOrphanStock();
+    doSaveNow();
+    refresh();
+  }
 
   return (
     <div>
       <p className="font-display text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing · Master Data</p>
       <h1 className="font-display mt-1 text-xl font-semibold text-slate-900 sm:text-2xl">Materials Master (วัตถุดิบ / บรรจุภัณฑ์)</h1>
       <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
-        <div className="relative w-full sm:w-72"><Icon name="search" size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ค้นหารายการ / รหัส..." className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-8 pr-3 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative w-full sm:w-72"><Icon name="search" size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ค้นหารายการ / รหัส..." className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-8 pr-3 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
+          </div>
+          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
+            <option value="all">ทุกสถานะ</option>
+            <option value="active">ใช้งานอยู่</option>
+            <option value="inactive">ปิดใช้งาน</option>
+          </select>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <button onClick={exportToExcel} disabled={filtered.length === 0} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+            <Icon name="download" size={14} /> Export Excel
+          </button>
           <input ref={fileInputRef} type="file" accept=".csv,.xlsx,.xls" onChange={handleStockFile} className="hidden" id="stock-upload-input" />
           <button onClick={() => fileInputRef.current && fileInputRef.current.click()} disabled={stockImportBusy} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">
             <Icon name="upload" size={14} /> {stockImportBusy ? 'กำลังนำเข้า...' : 'อัพโหลดสต็อก'}
@@ -4109,6 +4167,14 @@ function MaterialsTab({ store, refresh }) {
           {!adding && <button onClick={() => { setAdding(true); setFormError(null); }} className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-2 text-xs font-medium text-white hover:bg-slate-700"><Icon name="plus" size={14} /> เพิ่มรายการใหม่</button>}
         </div>
       </div>
+      {orphanStock.length > 0 && (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          <span>
+            พบข้อมูลสต็อก {orphanStock.length} รายการ ({orphanStock.map((o) => o.id).join(', ')}) ที่ไม่มีวัตถุดิบ/สินค้าตัวนี้อยู่ในระบบแล้ว (มักเป็นข้อมูลตัวอย่าง/เดโมเก่าที่หลงเหลืออยู่ ไม่กระทบการคำนวณ MRP เพราะไม่มี BOM ไหนอ้างถึง)
+          </span>
+          <button onClick={handlePruneOrphanStock} className="whitespace-nowrap rounded-lg bg-amber-600 px-3 py-1.5 font-medium text-white hover:bg-amber-700">ล้างข้อมูลนี้</button>
+        </div>
+      )}
       {stockImportResult && (
         <div className={`mt-3 rounded-lg px-3 py-2 text-xs ${stockImportResult.error ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>
           {stockImportResult.error
