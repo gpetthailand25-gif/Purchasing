@@ -142,9 +142,64 @@ function aggregateRequirement(explodedList) {
 }
 
 function explodeAndAggregate(forecastLines, asOfDate, repo) {
-  const all = [];
-  for (const line of forecastLines) all.push(...explodeBOM(line.productId, line.quantity, asOfDate, repo));
-  return aggregateRequirement(all);
+  // มาตรฐาน MRP: net สต็อก "ทีละชั้น" ของ BOM (ชั้นบนสุดก่อน) — ที่แต่ละชั้น ให้หักสต็อก/Open Production
+  // ของสินค้ากึ่งสำเร็จรูป/WIP ออกก่อน แล้วส่งต่อ "เฉพาะส่วนที่ยังขาด" ลงไประเบิดเป็นวัตถุดิบชั้นถัดไป
+  // (ก่อนหน้านี้ระบบระเบิด BOM เต็มจำนวนทุกชั้นโดยไม่สน stock ของสินค้ากึ่งสำเร็จรูประหว่างทางเลย ทำให้
+  // ถึงจะมีสต็อกสินค้ากึ่งสำเร็จรูปพอแล้ว MRP ก็ยังคำนวณให้ต้องซื้อวัตถุดิบเพิ่มอยู่ดี — จุดนี้คือจุดที่แก้)
+  // หมายเหตุ: การ net แบบนี้ถูกต้องเมื่อสินค้ากึ่งสำเร็จรูปแต่ละตัวอยู่ใน "ชั้นความลึก" เดียวกันของทุก BOM
+  // ที่อ้างถึงมัน (กรณีปกติของ BOM ร้านเบเกอรี่) หากมีสินค้ากึ่งสำเร็จรูปตัวเดียวกันถูกใช้ทั้งแบบตรงและแบบ
+  // ซ้อนอยู่ลึกกว่าในอีกสูตรหนึ่ง อาจ net สต็อกซ้ำได้เล็กน้อย ซึ่งเป็นกรณีพิเศษที่พบยากในทางปฏิบัติ
+  const grossReq = new Map(); // key: type+':'+id -> { type, id, unit, totalQty, breakdown }
+  function addReq(type, id, qty, unit, source) {
+    const key = type + ':' + id;
+    if (!grossReq.has(key)) grossReq.set(key, { type, id, unit, totalQty: 0, breakdown: [] });
+    const g = grossReq.get(key);
+    g.totalQty += qty;
+    g.breakdown.push({ qty, source });
+  }
+
+  let currentLevel = forecastLines.map((l) => ({ productId: l.productId, qty: l.quantity, path: [] }));
+  let depth = 0;
+  while (currentLevel.length > 0) {
+    if (depth > 50) throw new Error('BOM ลึกเกินไป (อาจมี Circular Reference ที่ตรวจไม่พบ) — คำนวณไม่สำเร็จ');
+    const nextLevelDemand = new Map(); // componentId -> { qty, path }
+    for (const node of currentLevel) {
+      if (node.path.some((p) => String(p) === String(node.productId))) {
+        throw new CircularBomError([...node.path, node.productId]);
+      }
+      const newPath = [...node.path, node.productId];
+      const bom = repo.getActiveBom(node.productId, asOfDate);
+      if (!bom) continue;
+      const yieldFactor = (bom.yieldPct ?? 100) / 100;
+      const lossFactor = 1 + (bom.lossPct ?? 0) / 100;
+      const batchYieldQty = (bom.batchYieldQty ?? 1) > 0 ? (bom.batchYieldQty ?? 1) : 1;
+      if (yieldFactor <= 0) throw new Error('yield_pct ต้องมากกว่า 0 (product_id=' + node.productId + ')');
+      for (const detail of bom.details) {
+        const perUnitQty = detail.quantity / batchYieldQty;
+        const neededQty = (node.qty * perUnitQty / yieldFactor) * lossFactor;
+        if (detail.componentType === 'RAW_MATERIAL' || detail.componentType === 'PACKAGING') {
+          // ถ้าวัตถุดิบตัวนี้กำลังถูกสลับไปใช้ตัวทดแทนอยู่ ให้คำนวณ requirement/stock ไปที่ตัวทดแทนแทน
+          const resolvedId = repo.resolveMaterial ? repo.resolveMaterial(detail.componentId) : detail.componentId;
+          addReq(detail.componentType, resolvedId, neededQty, detail.unit, { product: node.productId, bomDetailId: detail.bomDetailId, path: newPath });
+        } else if (detail.componentType === 'SEMI_FINISHED' || detail.componentType === 'WIP') {
+          addReq(detail.componentType, detail.componentId, neededQty, detail.unit, { product: node.productId, bomDetailId: detail.bomDetailId, path: newPath });
+          if (!nextLevelDemand.has(detail.componentId)) nextLevelDemand.set(detail.componentId, { qty: 0, path: newPath });
+          nextLevelDemand.get(detail.componentId).qty += neededQty;
+        } else {
+          throw new Error('Unknown component_type: ' + detail.componentType);
+        }
+      }
+    }
+    currentLevel = [];
+    for (const [componentId, demand] of nextLevelDemand.entries()) {
+      const stock = (repo.getStock && repo.getStock('SEMI_FINISHED', componentId)) || 0;
+      const openQty = (repo.getOpenProductionQty && repo.getOpenProductionQty(componentId)) || 0;
+      const netQty = round3(Math.max(0, demand.qty - stock - openQty));
+      if (netQty > 0) currentLevel.push({ productId: componentId, qty: netQty, path: demand.path });
+    }
+    depth++;
+  }
+  return Array.from(grossReq.values());
 }
 
 function calculateBomCost(productId, asOfDate, repo) {
@@ -186,9 +241,9 @@ function calculateMRP(forecastLines, asOfDate, repo) {
     if (netRequirement < 0) netRequirement = 0;
 
     const conversionRate = (repo.getConversionRate && repo.getConversionRate(item.id)) || 1;
-    const moq = (repo.getMoq && repo.getMoq(item.id)) || 0;
+    // ต้องซื้อ = ยอดที่ขาดจริง (ไม่รวม Safety Stock) แปลงเป็นหน่วยซื้อ ปัดขึ้นเป็นจำนวนเต็มหน่วยซื้อเท่านั้น
+    // ไม่บังคับปัดขึ้นตาม MOQ ของ Supplier อีกต่อไป — MOQ Sup เป็นข้อมูลอ้างอิงให้ผู้สั่งซื้อตัดสินใจเองว่าจะสั่งเพิ่มให้ถึงขั้นต่ำหรือไม่
     let purchaseQtyNeeded = conversionRate > 0 ? Math.ceil(round3(netRequirementNoSafety) / conversionRate) : null;
-    if (purchaseQtyNeeded !== null && purchaseQtyNeeded > 0 && moq > 0 && purchaseQtyNeeded < moq) purchaseQtyNeeded = moq;
 
     const needsAction = isProduced ? netRequirementNoSafety > 0 : (purchaseQtyNeeded !== null && purchaseQtyNeeded > 0);
     const status = needsAction
@@ -1723,6 +1778,12 @@ function createStore() {
     stockHistory.push({ date, materialId, qty });
   }
 
+  function isValidStockTarget(id) {
+    if (materials[id]) return true;
+    const p = products[id];
+    return !!(p && (p.type === 'SEMI_FINISHED' || p.type === 'WIP'));
+  }
+
   function importStock(rows) {
     let updated = 0;
     const notFound = [];
@@ -1732,7 +1793,7 @@ function createStore() {
       if (!rawId) continue;
       const id = rawId.replace(/^\*/, '');
       const qty = Number(r.totalStock);
-      if (!materials[id]) { notFound.push(rawId); continue; }
+      if (!isValidStockTarget(id)) { notFound.push(rawId); continue; }
       if (Number.isNaN(qty)) continue;
       stock[id] = qty;
       recordStockHistory(id, qty, today);
@@ -1740,6 +1801,16 @@ function createStore() {
     }
     stockUpdatedAt = new Date().toISOString();
     return { updated, notFoundCount: notFound.length, notFound: notFound.slice(0, 20), total: rows.length };
+  }
+
+  function setStockQty(id, qty) {
+    if (!isValidStockTarget(id)) throw new HttpError(404, 'ไม่พบรหัสวัตถุดิบ/สินค้ากึ่งสำเร็จรูป: ' + id);
+    const q = Number(qty);
+    if (Number.isNaN(q) || q < 0) throw new HttpError(400, 'จำนวนสต็อกต้องเป็นตัวเลขไม่ติดลบ');
+    stock[id] = q;
+    recordStockHistory(id, q, new Date().toISOString().slice(0, 10));
+    stockUpdatedAt = new Date().toISOString();
+    return { id, qty: q };
   }
 
   function getStockInfo() {
@@ -1761,7 +1832,8 @@ function createStore() {
     const today = new Date().toISOString().slice(0, 10);
     if (asOfDate >= today) return { ...stock }; // ปัจจุบัน/อนาคต ให้ใช้สต็อกสดเสมอ
     const result = {};
-    for (const id of Object.keys(materials)) result[id] = getStockAsOf(id, asOfDate);
+    const ids = [...Object.keys(materials), ...Object.entries(products).filter(([, p]) => p.type === 'SEMI_FINISHED' || p.type === 'WIP').map(([id]) => id)];
+    for (const id of ids) result[id] = getStockAsOf(id, asOfDate);
     return result;
   }
 
@@ -1827,12 +1899,12 @@ function createStore() {
     logActualOrder, listActualOrderLogs, updateActualOrderLog, deleteActualOrderLog, linkActualOrderToPo,
     getMrpMonthSummary,
     getDashboardPurchasing, getDashboardExecutive,
-    importStock, getStockInfo, listOrphanStock, pruneOrphanStock, getStockAsOf, listStockAsOf,
+    importStock, setStockQty, getStockInfo, listOrphanStock, pruneOrphanStock, getStockAsOf, listStockAsOf,
     snapshot, hydrate,
   };
 }
 
-const MUTATORS = ['createProduct', 'updateProduct', 'deleteProduct', 'createMaterial', 'updateMaterial', 'deleteMaterial', 'setActiveSubstitute', 'addBomDetail', 'removeBomDetail', 'updateBomDetail', 'updateBomHeader', 'upsertForecast', 'addForecastAdjustment', 'deleteForecast', 'removeForecastAdjustment', 'updateForecastWeeklyActual', 'createSpecialPeriod', 'deleteSpecialPeriod', 'upsertSpecialForecast', 'deleteSpecialForecast', 'createPurchaseOrder', 'receiveGoods', 'updatePurchaseOrder', 'deletePurchaseOrder', 'logActualOrder', 'updateActualOrderLog', 'deleteActualOrderLog', 'linkActualOrderToPo', 'importStock', 'pruneOrphanStock'];
+const MUTATORS = ['createProduct', 'updateProduct', 'deleteProduct', 'createMaterial', 'updateMaterial', 'deleteMaterial', 'setActiveSubstitute', 'addBomDetail', 'removeBomDetail', 'updateBomDetail', 'updateBomHeader', 'upsertForecast', 'addForecastAdjustment', 'deleteForecast', 'removeForecastAdjustment', 'updateForecastWeeklyActual', 'createSpecialPeriod', 'deleteSpecialPeriod', 'upsertSpecialForecast', 'deleteSpecialForecast', 'createPurchaseOrder', 'receiveGoods', 'updatePurchaseOrder', 'deletePurchaseOrder', 'logActualOrder', 'updateActualOrderLog', 'deleteActualOrderLog', 'linkActualOrderToPo', 'importStock', 'setStockQty', 'pruneOrphanStock'];
 
 /* ============================================================================
    PERSISTENCE — Firestore (client-side, ดู FIREBASE_CONFIG ด้านบนสุดของไฟล์)
@@ -3158,7 +3230,7 @@ function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actua
       <h3 className="text-sm font-semibold text-slate-700">{title}</h3>
       <div className="mt-2 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
-          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">Material</th><th className="px-4 py-3 text-right" title="ยอด Gross จาก Forecast — ถ้ามีส่วนเพิ่มระหว่างเดือน จะแสดงยอดเปรียบเทียบ Forecast เดิม + สั่งเพิ่ม ใต้ตัวเลข">Gross</th><th className="px-4 py-3 text-right">Stock</th><th className="px-4 py-3 text-right">Open PO</th><th className="px-4 py-3 text-right" title="MOQ ขั้นต่ำของ Supplier (หน่วยซื้อ) — ใช้ปัดขึ้นปริมาณสั่งซื้อจริง">MOQ Sup</th><th className="px-4 py-3 text-right" title="Gross + Safety Stock - Stock - Open PO (แสดงข้อมูลประกอบ)">Net Requirement</th><th className="px-4 py-3 text-right" title="ปริมาณที่ต้องสั่งซื้อจริง = Gross - Stock - Open PO (ไม่รวม Safety Stock) แปลงเป็นหน่วยซื้อ และปัดขึ้นตาม MOQ ของ Supplier">ต้องซื้อ (หน่วยซื้อ)</th><th className="px-4 py-3 text-right">สั่งจริง</th><th className="px-4 py-3">สถานะ</th></tr></thead>
+          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">Material</th><th className="px-4 py-3 text-right" title="ยอด Gross จาก Forecast — ถ้ามีส่วนเพิ่มระหว่างเดือน จะแสดงยอดเปรียบเทียบ Forecast เดิม + สั่งเพิ่ม ใต้ตัวเลข">Gross</th><th className="px-4 py-3 text-right">Stock</th><th className="px-4 py-3 text-right">Open PO</th><th className="px-4 py-3 text-right" title="MOQ ขั้นต่ำของ Supplier (หน่วยซื้อ) — แสดงเป็นข้อมูลอ้างอิง ไม่ได้ถูกบวกเข้าไปในยอดต้องซื้ออัตโนมัติ">MOQ Sup</th><th className="px-4 py-3 text-right" title="Gross - Stock - Open PO (ไม่รวม Safety Stock)">Net Requirement</th><th className="px-4 py-3 text-right" title="ปริมาณที่ต้องสั่งซื้อจริง = Net Requirement แปลงเป็นหน่วยซื้อ ปัดขึ้นเป็นจำนวนเต็มหน่วย (ไม่ได้ปัดขึ้นตาม MOQ ของ Supplier — ผู้สั่งซื้อพิจารณาเองว่าจะสั่งเพิ่มให้ถึงขั้นต่ำหรือไม่)">ต้องซื้อ (หน่วยซื้อ)</th><th className="px-4 py-3 text-right">สั่งจริง</th><th className="px-4 py-3">สถานะ</th></tr></thead>
           <tbody>
             {rows.map((r) => {
               const rowKey = keyPrefix + r.type + r.id;
@@ -3185,7 +3257,7 @@ function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actua
                     <td className="px-4 py-3 text-right tabular text-slate-500">{isMaterial ? `${fmt(r.currentStock / conversionRate)} ${purchaseUnit}` : `${fmt(r.currentStock)} ${r.unit}`}</td>
                     <td className="px-4 py-3 text-right tabular text-slate-500">{fmt(r.openQty)} {r.unit}</td>
                     <td className="px-4 py-3 text-right tabular text-slate-500">{isMaterial ? (mat?.moq ? `${fmt(mat.moq)} ${purchaseUnit}` : '—') : `${fmt(r.safetyStock)} ${r.unit}`}</td>
-                    <td className="px-4 py-3 text-right tabular font-semibold text-slate-900">{fmt(r.netRequirement)} {r.unit}</td>
+                    <td className="px-4 py-3 text-right tabular font-semibold text-slate-900">{fmt(r.netRequirementNoSafety)} {r.unit}</td>
                     <td className="px-4 py-3 text-right tabular font-semibold text-amber-700">{isMaterial && r.purchaseQtyNeeded !== null && r.purchaseQtyNeeded !== undefined ? `${fmt(r.purchaseQtyNeeded)} ${purchaseUnit}` : '—'}</td>
                     <td className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
                       <div className="flex flex-col items-end gap-1">
@@ -3232,8 +3304,8 @@ function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actua
                         {isMaterial && r.purchaseQtyNeeded > 0 && (
                           <p className="mt-2 text-xs text-slate-500">
                             ต้องสั่งซื้อ (ไม่รวม Safety Stock) ≈ <span className="font-semibold text-slate-800">{fmt(r.purchaseQtyNeeded)} {purchaseUnit}</span> (1 {purchaseUnit} = {fmt(mat?.conversionRate ?? 1)} {r.unit})
-                            {mat?.moq > 0 && r.purchaseQtyNeeded === mat.moq && round3(r.netRequirementNoSafety / (mat?.conversionRate || 1)) < mat.moq && (
-                              <span className="ml-1 text-slate-400">— ปัดขึ้นตาม MOQ ขั้นต่ำของ Supplier ({fmt(mat.moq)} {purchaseUnit})</span>
+                            {mat?.moq > 0 && r.purchaseQtyNeeded < mat.moq && (
+                              <span className="ml-1 text-amber-600">— น้อยกว่า MOQ ขั้นต่ำของ Supplier ({fmt(mat.moq)} {purchaseUnit}) พิจารณาสั่งเพิ่มให้ถึงขั้นต่ำเองหากต้องการ</span>
                             )}
                           </p>
                         )}
@@ -4006,6 +4078,19 @@ function WhereUsed({ productId, productType, products, store, jumpTo }) {
 const EMPTY_MATERIAL_FORM = { materialId: '', name: '', type: 'RAW_MATERIAL', unit: '', price: '', purchaseUnit: '', conversionRate: '1', safetyStock: '', moq: '', maxStock: '', shelfLifeMonths: '', supplierName: '', note: '', active: true };
 
 function MaterialsTab({ store, refresh }) {
+  const [mode, setMode] = useState('materials');
+  return (
+    <div>
+      <div className="mb-5 inline-flex rounded-lg border border-slate-200 bg-white p-1 text-sm">
+        <button onClick={() => setMode('materials')} className={`rounded-md px-3.5 py-1.5 font-medium transition ${mode === 'materials' ? 'bg-slate-900 text-white' : 'text-slate-500 hover:text-slate-700'}`}>วัตถุดิบ / บรรจุภัณฑ์</button>
+        <button onClick={() => setMode('semi')} className={`rounded-md px-3.5 py-1.5 font-medium transition ${mode === 'semi' ? 'bg-slate-900 text-white' : 'text-slate-500 hover:text-slate-700'}`}>สต็อกสินค้ากึ่งสำเร็จรูป (SEMI/WIP)</button>
+      </div>
+      {mode === 'materials' ? <MaterialsMasterPanel store={store} refresh={refresh} /> : <SemiStockPanel store={store} refresh={refresh} />}
+    </div>
+  );
+}
+
+function MaterialsMasterPanel({ store, refresh }) {
   const materials = store.materials;
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
@@ -4401,6 +4486,108 @@ function MaterialsTab({ store, refresh }) {
 /* ============================================================================
    TAB: PO Tracking (+ สร้าง PO)
    ============================================================================ */
+
+function SemiStockPanel({ store, refresh }) {
+  const products = store.products;
+  const boms = store.boms;
+  const [editingId, setEditingId] = useState(null);
+  const [editQty, setEditQty] = useState('');
+  const [rowError, setRowError] = useState(null);
+  const [stockPeriod, setStockPeriod] = useState('current');
+
+  const stockPeriodOptions = useMemo(() => {
+    const now = new Date();
+    const opts = [];
+    for (let i = 0; i < 12; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      opts.push({ value: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`, label: `${THAI_MONTHS[d.getMonth()]} ${d.getFullYear()}` });
+    }
+    return opts;
+  }, []);
+  const stockAsOfDate = stockPeriod === 'current' ? null : (() => {
+    const [y, mo] = stockPeriod.split('-').map(Number);
+    return `${y}-${String(mo).padStart(2, '0')}-${String(new Date(y, mo, 0).getDate()).padStart(2, '0')}`;
+  })();
+  const stockMap = stockAsOfDate ? store.listStockAsOf(stockAsOfDate) : null;
+  function stockValueFor(id) { return stockMap ? stockMap[id] : (store.stock[id] || 0); }
+
+  const semiProducts = Object.entries(products)
+    .filter(([, p]) => p.type === 'SEMI_FINISHED' || p.type === 'WIP')
+    .sort(([idA], [idB]) => idA.localeCompare(idB, undefined, { numeric: true, sensitivity: 'base' }));
+
+  function startEdit(id) { setEditingId(id); setEditQty(String(store.stock[id] || 0)); setRowError(null); }
+
+  function saveEdit(id) {
+    try {
+      store.setStockQty(id, editQty);
+      doSaveNow();
+      setEditingId(null);
+      refresh();
+    } catch (e) { setRowError({ id, message: e.message }); }
+  }
+
+  return (
+    <div>
+      <p className="font-display text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing · Master Data</p>
+      <h1 className="font-display mt-1 text-xl font-semibold text-slate-900 sm:text-2xl">สต็อกสินค้ากึ่งสำเร็จรูป (SEMI / WIP)</h1>
+      <p className="mt-2 text-sm text-slate-500">สต็อกของสินค้ากึ่งสำเร็จรูป/WIP (เช่น ไส้ที่เตรียมไว้ล่วงหน้า, โดที่พักไว้) ระบบจะนำไปหักลบยอดที่ต้องผลิตใน MRP โดยอัตโนมัติ — แก้ไขจำนวนได้โดยตรงที่นี่ หรืออัพโหลดผ่านไฟล์สต็อกเดียวกับหน้าวัตถุดิบก็ได้ (ใส่รหัสสินค้ากึ่งสำเร็จรูปในคอลัมน์รหัสได้เลย)</p>
+
+      <div className="mt-4 flex items-center gap-2">
+        <select value={stockPeriod} onChange={(e) => setStockPeriod(e.target.value)} title="ดูสต็อกคงเหลือ ณ งวดที่เลือก" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
+          <option value="current">สต็อก: ปัจจุบัน</option>
+          {stockPeriodOptions.map((o) => <option key={o.value} value={o.value}>สต็อก ณ {o.label}</option>)}
+        </select>
+      </div>
+      {stockAsOfDate && (
+        <div className="mt-3 rounded-lg bg-sky-50 px-3 py-2 text-xs text-sky-700">
+          กำลังดูสต็อกย้อนหลัง ณ สิ้น{stockPeriodOptions.find((o) => o.value === stockPeriod)?.label} — แก้ไขได้เฉพาะตอนดูสต็อก "ปัจจุบัน" เท่านั้น
+        </div>
+      )}
+
+      <div className="mt-4 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+        <table className="w-full text-sm">
+          <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">รหัส</th><th className="px-4 py-3">รายการ</th><th className="px-4 py-3">ประเภท</th><th className="px-4 py-3 text-right">สต็อกคงเหลือ{stockAsOfDate ? ` (ณ ${stockPeriodOptions.find((o) => o.value === stockPeriod)?.label})` : ''}</th><th className="px-4 py-3"></th></tr></thead>
+          <tbody>
+            {semiProducts.length === 0 && <tr><td colSpan={5} className="px-4 py-8 text-center text-sm text-slate-400">ยังไม่มีสินค้ากึ่งสำเร็จรูป/WIP ในระบบ</td></tr>}
+            {semiProducts.map(([id, p]) => {
+              const unit = boms[id]?.batchYieldUnit || 'ชิ้น';
+              const isEditing = editingId === id;
+              const v = stockValueFor(id);
+              return (
+                <Fragment key={id}>
+                  <tr className="border-b border-slate-50 last:border-0">
+                    <td className="px-4 py-3 tabular text-xs text-slate-400">{id}</td>
+                    <td className="px-4 py-3 font-medium text-slate-800">{p.name}</td>
+                    <td className="px-4 py-3"><TypeTag type={p.type} /></td>
+                    <td className="px-4 py-3 text-right tabular text-slate-700">
+                      {isEditing ? (
+                        <div className="flex items-center justify-end gap-2">
+                          <input type="number" value={editQty} onChange={(e) => setEditQty(e.target.value)} autoFocus className="w-28 rounded-lg border border-slate-200 px-2 py-1 text-right text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
+                          <span className="text-slate-400">{unit}</span>
+                        </div>
+                      ) : (v === null ? <span className="text-xs italic text-slate-300">ไม่มีข้อมูล</span> : <>{fmt(v)} <span className="text-slate-400">{unit}</span></>)}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      {isEditing ? (
+                        <div className="flex items-center justify-end gap-2">
+                          <button onClick={() => saveEdit(id)} className="rounded-lg bg-slate-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-slate-700">บันทึก</button>
+                          <button onClick={() => setEditingId(null)} className="rounded-lg px-2.5 py-1 text-xs font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
+                        </div>
+                      ) : (
+                        <button onClick={() => startEdit(id)} disabled={!!stockAsOfDate} title={stockAsOfDate ? 'ดูย้อนหลังอยู่ สลับกลับ "ปัจจุบัน" ก่อนจึงแก้ไขได้' : 'แก้ไขจำนวน'} className="text-slate-400 hover:text-slate-600 disabled:cursor-not-allowed disabled:opacity-30"><Icon name="pencil" size={14} /></button>
+                      )}
+                    </td>
+                  </tr>
+                  {rowError?.id === id && <tr><td colSpan={5} className="px-4 pb-2 pt-0"><p className="text-[11px] text-red-600">{rowError.message}</p></td></tr>}
+                </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
 
 function PoTab({ store, refresh }) {
   const [creating, setCreating] = useState(false);
