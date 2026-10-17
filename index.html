@@ -158,6 +158,7 @@ function explodeAndAggregate(forecastLines, asOfDate, repo) {
     g.breakdown.push({ qty, source });
   }
 
+  const plannedProd = new Map(); // componentId -> { batches, plannedQty, batchSize }
   let currentLevel = forecastLines.map((l) => ({ productId: l.productId, qty: l.quantity, path: [] }));
   let depth = 0;
   while (currentLevel.length > 0) {
@@ -195,9 +196,24 @@ function explodeAndAggregate(forecastLines, asOfDate, repo) {
       const stock = (repo.getStock && repo.getStock('SEMI_FINISHED', componentId)) || 0;
       const openQty = (repo.getOpenProductionQty && repo.getOpenProductionQty(componentId)) || 0;
       const netQty = round3(Math.max(0, demand.qty - stock - openQty));
-      if (netQty > 0) currentLevel.push({ productId: componentId, qty: netQty, path: demand.path });
+      if (netQty > 0) {
+        // WIP/กึ่งสำเร็จรูป ผลิตเป็น "แบตเต็ม" เท่านั้น: รวมยอดจากทุกสินค้าที่ใช้ตัวนี้ (nextLevelDemand) → หักสต็อก → ปัดขึ้นเป็นจำนวนแบต
+        // แล้วค่อยระเบิดวัตถุดิบตามจำนวนแบตที่ปัดแล้ว (ไม่เฉลี่ยตามกระปุก)
+        const cBom = repo.getActiveBom(componentId, asOfDate);
+        const bq = cBom && Number(cBom.batchYieldQty) > 0 ? Number(cBom.batchYieldQty) : 0;
+        let plannedQty = netQty, batches = null;
+        if (bq > 0) { batches = Math.ceil(round3(netQty / bq)); plannedQty = round3(batches * bq); }
+        const prev = plannedProd.get(componentId) || { batches: 0, plannedQty: 0, batchSize: bq };
+        prev.batches += (batches || 0); prev.plannedQty += plannedQty;
+        plannedProd.set(componentId, prev);
+        currentLevel.push({ productId: componentId, qty: plannedQty, path: demand.path });
+      }
     }
     depth++;
+  }
+  for (const g of grossReq.values()) {
+    const pp = plannedProd.get(g.id);
+    if (pp && (g.type === 'SEMI_FINISHED' || g.type === 'WIP')) { g.productionBatches = pp.batches; g.plannedProductionQty = round3(pp.plannedQty); g.batchSize = pp.batchSize; }
   }
   return Array.from(grossReq.values());
 }
@@ -257,6 +273,7 @@ function calculateMRP(forecastLines, asOfDate, repo) {
       grossRequirement: round3(grossRequirement), safetyStock, currentStock: stock, openQty, scheduledReceipt,
       netRequirement: round3(netRequirement), netRequirementNoSafety: round3(netRequirementNoSafety),
       purchaseQtyNeeded, requirementValue, status, needsAction, breakdown: item.breakdown,
+      productionBatches: item.productionBatches, plannedProductionQty: item.plannedProductionQty, batchSize: item.batchSize,
     });
   }
   return results;
@@ -3306,7 +3323,7 @@ function MrpTable({ title, rows, nameOf, materials, expanded, setExpanded, actua
                         )}
                       </div>
                     </td>
-                    <td className="px-4 py-3"><StatusBadge status={r.status} /></td>
+                    <td className="px-4 py-3"><StatusBadge status={r.status} />{r.productionBatches > 0 && <div className="mt-1 text-[11px] text-slate-500">ผลิต {fmt(r.productionBatches)} แบต ({fmt(r.plannedProductionQty)} {r.unit})</div>}</td>
                   </tr>
                   {isOpen && (
                     <tr className="bg-slate-50/40"><td colSpan={9} className="px-4 py-3">
