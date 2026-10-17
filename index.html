@@ -1096,7 +1096,7 @@ function createStore() {
     return {
       getActiveBom(productId) {
         const bom = boms[productId];
-        if (!bom || new Date(bom.effectiveDate) > new Date(asOfDate)) return null;
+        if (!bom) return null;
         return bom;
       },
       resolveMaterial,
@@ -1381,12 +1381,20 @@ function createStore() {
     const base = calculateMRP(baseLines, asOfDate, repo);
     const adjustmentLines = lines.filter((f) => f.adjustments.length > 0).map((f) => ({ productId: f.productId, quantity: f.adjustments.reduce((s, a) => s + a.additionalQty, 0) }));
     const incremental = adjustmentLines.length > 0 ? calculateIncrementalMRP(adjustmentLines, asOfDate, repo) : [];
-    return { base, incremental };
+    const warnings = [];
+    for (const f of lines) {
+      const raw = boms[f.productId];
+      const bom = repo.getActiveBom(f.productId, asOfDate);
+      const pname = (products[f.productId] || {}).name || f.productId;
+      if (!raw) warnings.push({ productId: f.productId, name: pname, reason: 'ยังไม่มี BOM' });
+      else if (!bom.details || bom.details.length === 0) warnings.push({ productId: f.productId, name: pname, reason: 'BOM ไม่มีส่วนประกอบ' });
+    }
+    return { base, incremental, warnings };
   }
 
   function getBomTree(productId, asOfDate) {
     const bom = boms[productId];
-    if (!bom || new Date(bom.effectiveDate) > new Date(asOfDate)) return null;
+    if (!bom) return null;
     return {
       productId,
       productName: products[productId] ? products[productId].name : productId,
@@ -1420,7 +1428,7 @@ function createStore() {
       const cycle = wouldCreateCycle(productId, detail.componentId, (pid) => repo.getSemiFinishedChildren(pid));
       if (cycle) throw new CircularBomError([productId, detail.componentId]);
     }
-    if (!boms[productId]) boms[productId] = { version: 'v1.0', effectiveDate: asOfDate, batchYieldQty: 1, batchYieldUnit: 'ชิ้น', lossPct: 0, yieldPct: 100, details: [] };
+    if (!boms[productId]) boms[productId] = { version: 'v1.0', effectiveDate: '2000-01-01', batchYieldQty: 1, batchYieldUnit: 'ชิ้น', lossPct: 0, yieldPct: 100, details: [] };
     const bomDetailId = 'd' + nextBomDetailId++;
     boms[productId].details.push({ bomDetailId, ...detail });
     return boms[productId];
@@ -3054,6 +3062,12 @@ function NormalMrpPanel({ store, refresh }) {
           <button onClick={runMRP} className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-3.5 py-2 text-sm font-medium text-white transition hover:bg-amber-700"><Icon name="calculator" size={16} /> คำนวณ MRP</button>
         </div>
       </div>
+      {mrpResult && mrpResult.warnings && mrpResult.warnings.length > 0 && (
+        <div className="mt-4 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <p className="font-semibold">มีสินค้าใน Forecast ที่ MRP คำนวณวัตถุดิบให้ไม่ได้:</p>
+          <ul className="mt-1 list-disc pl-5">{mrpResult.warnings.map((w) => <li key={w.productId}>{w.name} ({w.productId}) — {w.reason}</li>)}</ul>
+        </div>
+      )}
       {error && <div className="mt-4"><ErrorBox message={error.message} onRetry={runMRP} /></div>}
       {kpis && (
         <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -3536,7 +3550,6 @@ function BomTab({ store, refresh }) {
           'ชื่อสินค้า': p.name,
           'ประเภทสินค้า': PRODUCT_TYPE_LABEL[p.type] || p.type,
           'Version': t.version || '',
-          'วันที่มีผล': t.effectiveDate || '',
           'Loss %': isFg ? '' : (t.lossPct ?? 0),
           'Yield %': isFg ? '' : (t.yieldPct ?? 100),
           'ผลิตได้/Batch': t.batchYieldQty ?? 1,
@@ -3787,8 +3800,7 @@ function BomMaster({ productId, products, materials, store, refresh }) {
       try {
         store.updateBomHeader(productId, {
           version: tree.version || 'v1.0',
-          effectiveDate: tree.effectiveDate || TODAY,
-          batchYieldQty: 1,
+                    batchYieldQty: 1,
           batchYieldUnit: headerDraft.batchYieldUnit.trim() || 'ชิ้น',
           lossPct: 0,
           yieldPct: 100,
@@ -3799,12 +3811,12 @@ function BomMaster({ productId, products, materials, store, refresh }) {
       } catch (e) { setSubmitError(e.message); }
       return;
     }
-    if (!headerDraft.version.trim() || !headerDraft.effectiveDate) { setSubmitError('กรุณาระบุ Version และวันที่มีผลให้ครบ'); return; }
+    if (!headerDraft.version.trim()) { setSubmitError('กรุณาระบุ Version'); return; }
     if (!(Number(headerDraft.batchYieldQty) > 0)) { setSubmitError('จำนวนที่ผลิตได้/Batch ต้องมากกว่า 0'); return; }
     if (!(Number(headerDraft.yieldPct) > 0)) { setSubmitError('Yield % ต้องมากกว่า 0'); return; }
     try {
       store.updateBomHeader(productId, {
-        version: headerDraft.version.trim(), effectiveDate: headerDraft.effectiveDate,
+        version: headerDraft.version.trim(),
         batchYieldQty: Number(headerDraft.batchYieldQty), batchYieldUnit: headerDraft.batchYieldUnit.trim() || 'ชิ้น', lossPct: Number(headerDraft.lossPct), yieldPct: Number(headerDraft.yieldPct),
       });
       setEditingHeader(false);
@@ -3847,7 +3859,6 @@ function BomMaster({ productId, products, materials, store, refresh }) {
       'ชื่อสินค้า': products[productId]?.name || productId,
       'ประเภทสินค้า': PRODUCT_TYPE_LABEL[products[productId]?.type] || products[productId]?.type,
       'Version': tree.version || '',
-      'วันที่มีผล': tree.effectiveDate || '',
       'Loss %': isFinished ? '' : (tree.lossPct ?? 0),
       'Yield %': isFinished ? '' : (tree.yieldPct ?? 100),
       'ผลิตได้/Batch': tree.batchYieldQty ?? 1,
@@ -3880,7 +3891,7 @@ function BomMaster({ productId, products, materials, store, refresh }) {
             ) : (
               <>
                 <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">{tree.version || 'ยังไม่มี BOM'}</span>
-                <span className="text-xs text-slate-400">ณ {tree.effectiveDate || TODAY}</span>
+                
                 {tree.version && (
                   <span className="inline-flex items-center gap-2 rounded-full bg-slate-50 px-2.5 py-1 text-xs text-slate-500">
                     <span>Loss {fmt(tree.lossPct ?? 0)}%</span><span className="text-slate-300">·</span>
@@ -3905,7 +3916,6 @@ function BomMaster({ productId, products, materials, store, refresh }) {
         ) : (
           <>
             <div><label className="text-xs text-slate-500">Version</label><input value={headerDraft.version} onChange={(e) => setHeaderDraft((h) => ({ ...h, version: e.target.value }))} className="mt-1 block w-28 rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
-            <div><label className="text-xs text-slate-500">วันที่มีผล</label><input type="date" value={headerDraft.effectiveDate} onChange={(e) => setHeaderDraft((h) => ({ ...h, effectiveDate: e.target.value }))} className="mt-1 block rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
             <div><label className="text-xs text-slate-500">Loss %</label><input type="number" value={headerDraft.lossPct} onChange={(e) => setHeaderDraft((h) => ({ ...h, lossPct: e.target.value }))} className="mt-1 block w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
             <div><label className="text-xs text-slate-500">Yield %</label><input type="number" value={headerDraft.yieldPct} onChange={(e) => setHeaderDraft((h) => ({ ...h, yieldPct: e.target.value }))} className="mt-1 block w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
             <div><label className="text-xs text-slate-500" title="จำนวนที่ผลิตได้จาก Batch นี้">ผลิตได้/Batch</label><input type="number" min="0" value={headerDraft.batchYieldQty} onChange={(e) => setHeaderDraft((h) => ({ ...h, batchYieldQty: e.target.value }))} className="mt-1 block w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
