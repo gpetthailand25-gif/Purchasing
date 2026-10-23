@@ -107,10 +107,9 @@ function explodeBOM(productId, requiredQty, asOfDate, repo, visitedPath = []) {
   const newPath = [...visitedPath, productId];
   const bom = repo.getActiveBom(productId, asOfDate);
   if (!bom) return [];
-  const yieldFactor = (bom.yieldPct ?? 100) / 100;
+  const yieldFactor = 1;
   const lossFactor = 1 + (bom.lossPct ?? 0) / 100;
   const batchYieldQty = (bom.batchYieldQty ?? 1) > 0 ? (bom.batchYieldQty ?? 1) : 1;
-  if (yieldFactor <= 0) throw new Error('yield_pct ต้องมากกว่า 0 (product_id=' + productId + ')');
   const results = [];
   for (const detail of bom.details) {
     const perUnitQty = detail.quantity / batchYieldQty;
@@ -171,10 +170,9 @@ function explodeAndAggregate(forecastLines, asOfDate, repo) {
       const newPath = [...node.path, node.productId];
       const bom = repo.getActiveBom(node.productId, asOfDate);
       if (!bom) continue;
-      const yieldFactor = (bom.yieldPct ?? 100) / 100;
+      const yieldFactor = 1;
       const lossFactor = 1 + (bom.lossPct ?? 0) / 100;
       const batchYieldQty = (bom.batchYieldQty ?? 1) > 0 ? (bom.batchYieldQty ?? 1) : 1;
-      if (yieldFactor <= 0) throw new Error('yield_pct ต้องมากกว่า 0 (product_id=' + node.productId + ')');
       for (const detail of bom.details) {
         const perUnitQty = detail.quantity / batchYieldQty;
         const neededQty = (node.qty * perUnitQty / yieldFactor) * lossFactor;
@@ -221,7 +219,7 @@ function explodeAndAggregate(forecastLines, asOfDate, repo) {
 function calculateBomCost(productId, asOfDate, repo) {
   const bom = repo.getActiveBom(productId, asOfDate);
   if (!bom) return repo.getMaterialPrice ? (repo.getMaterialPrice(productId) || 0) : 0;
-  const yieldFactor = (bom.yieldPct ?? 100) / 100;
+  const yieldFactor = 1;
   const lossFactor = 1 + (bom.lossPct ?? 0) / 100;
   const batchYieldQty = (bom.batchYieldQty ?? 1) > 0 ? (bom.batchYieldQty ?? 1) : 1;
   let total = 0;
@@ -300,6 +298,17 @@ function calculateOverdue(expectedDeliveryDate, today, isFullyReceived) {
 }
 
 function round3(n) { return Math.round(n * 1000) / 1000; }
+// ผลิตได้/Batch อัตโนมัติ = น้ำหนักรวม Component × (1 − Loss%) (ใช้เมื่อไม่ใช่ FG และทุก Component มีหน่วยเดียวกับหน่วย Batch)
+function autoBatchQty(bom, productType) {
+  if (!bom || productType === 'FINISHED') return null;
+  const details = bom.details || [];
+  if (details.length === 0) return null;
+  const unit = bom.batchYieldUnit ?? 'ชิ้น';
+  if (!details.every((d) => d.unit === unit)) return null;
+  const total = details.reduce((sum, d) => sum + Number(d.quantity || 0), 0);
+  const loss = Math.min(Math.max(Number(bom.lossPct) || 0, 0), 99.99);
+  return Math.round(total * (1 - loss / 100) * 100) / 100;
+}
 function round2(n) { return Math.round(n * 100) / 100; }
 
 class HttpError extends Error {
@@ -312,29 +321,29 @@ class HttpError extends Error {
 
 function createStore() {
   const boms = {
-    P003: { version: 'v1.0', effectiveDate: '2026-01-01', batchYieldQty: 1, lossPct: 0, yieldPct: 100, details: [
+    P003: { version: 'v1.0', effectiveDate: '2026-01-01', batchYieldQty: 1, lossPct: 0, details: [
       { bomDetailId: 'd1', componentType: 'RAW_MATERIAL', componentId: 'M001', quantity: 0.025, unit: 'kg' },
       { bomDetailId: 'd2', componentType: 'RAW_MATERIAL', componentId: 'M002', quantity: 0.010, unit: 'kg' },
       { bomDetailId: 'd3', componentType: 'RAW_MATERIAL', componentId: 'M003', quantity: 0.002, unit: 'kg' },
       { bomDetailId: 'd4', componentType: 'RAW_MATERIAL', componentId: 'M004', quantity: 0.008, unit: 'kg' },
       { bomDetailId: 'd5', componentType: 'RAW_MATERIAL', componentId: 'M005', quantity: 0.015, unit: 'kg' },
     ]},
-    P001: { version: 'v1.0', effectiveDate: '2026-01-01', batchYieldQty: 1, lossPct: 0, yieldPct: 100, details: [
+    P001: { version: 'v1.0', effectiveDate: '2026-01-01', batchYieldQty: 1, lossPct: 0, details: [
       { bomDetailId: 'd6', componentType: 'SEMI_FINISHED', componentId: 'P003', quantity: 1, unit: 'pcs' },
       { bomDetailId: 'd7', componentType: 'RAW_MATERIAL', componentId: 'M007', quantity: 0.020, unit: 'kg' },
       { bomDetailId: 'd8', componentType: 'PACKAGING', componentId: 'M006', quantity: 1, unit: 'pcs' },
     ]},
-    P002: { version: 'v1.0', effectiveDate: '2026-01-01', batchYieldQty: 1, lossPct: 0, yieldPct: 100, details: [
+    P002: { version: 'v1.0', effectiveDate: '2026-01-01', batchYieldQty: 1, lossPct: 0, details: [
       { bomDetailId: 'd9', componentType: 'SEMI_FINISHED', componentId: 'P003', quantity: 1, unit: 'pcs' },
       { bomDetailId: 'd10', componentType: 'RAW_MATERIAL', componentId: 'M008', quantity: 0.015, unit: 'kg' },
       { bomDetailId: 'd11', componentType: 'PACKAGING', componentId: 'M006', quantity: 1, unit: 'pcs' },
     ]},
-    P004: { version: 'v1.0', effectiveDate: '2026-01-01', batchYieldQty: 1, lossPct: 0, yieldPct: 100, details: [
+    P004: { version: 'v1.0', effectiveDate: '2026-01-01', batchYieldQty: 1, lossPct: 0, details: [
       { bomDetailId: 'd12', componentType: 'SEMI_FINISHED', componentId: 'P003', quantity: 1, unit: 'pcs' },
       { bomDetailId: 'd13', componentType: 'RAW_MATERIAL', componentId: 'M009', quantity: 0.018, unit: 'kg' },
       { bomDetailId: 'd14', componentType: 'PACKAGING', componentId: 'M006', quantity: 1, unit: 'pcs' },
     ]},
-    P005: { version: 'v1.0', effectiveDate: '2026-01-01', batchYieldQty: 1, lossPct: 0, yieldPct: 100, details: [
+    P005: { version: 'v1.0', effectiveDate: '2026-01-01', batchYieldQty: 1, lossPct: 0, details: [
       { bomDetailId: 'd15', componentType: 'SEMI_FINISHED', componentId: 'P003', quantity: 1, unit: 'pcs' },
       { bomDetailId: 'd16', componentType: 'RAW_MATERIAL', componentId: 'M010', quantity: 0.018, unit: 'kg' },
       { bomDetailId: 'd17', componentType: 'PACKAGING', componentId: 'M006', quantity: 1, unit: 'pcs' },
@@ -1114,7 +1123,9 @@ function createStore() {
       getActiveBom(productId) {
         const bom = boms[productId];
         if (!bom) return null;
-        return bom;
+        const auto = autoBatchQty(bom, (products[productId] || {}).type);
+        // auto: ปริมาณที่ผลิตได้หัก Loss ไปแล้ว จึงไม่คูณ Loss ซ้ำในสูตร
+        return auto && auto > 0 ? { ...bom, batchYieldQty: auto, lossPct: 0 } : bom;
       },
       resolveMaterial,
       // stock/safetyStock/MOQ ของวัตถุดิบถูกกรอก/นำเข้าเป็น "หน่วยซื้อ" (เช่น ลัง/ถุง/กระสอบ) เหมือน price
@@ -1417,10 +1428,9 @@ function createStore() {
       productName: products[productId] ? products[productId].name : productId,
       version: bom.version,
       effectiveDate: bom.effectiveDate,
-      batchYieldQty: bom.batchYieldQty ?? 1,
+      batchYieldQty: (() => { const a = autoBatchQty(bom, (products[productId] || {}).type); return a && a > 0 ? a : (bom.batchYieldQty ?? 1); })(),
       batchYieldUnit: bom.batchYieldUnit ?? 'ชิ้น',
       lossPct: bom.lossPct ?? 0,
-      yieldPct: bom.yieldPct ?? 100,
       components: bom.details.map((d) => ({
         bomDetailId: d.bomDetailId, componentType: d.componentType, componentId: d.componentId,
         name: (d.componentType === 'SEMI_FINISHED' || d.componentType === 'WIP') ? (products[d.componentId] || {}).name : (materials[d.componentId] || {}).name,
@@ -1445,7 +1455,7 @@ function createStore() {
       const cycle = wouldCreateCycle(productId, detail.componentId, (pid) => repo.getSemiFinishedChildren(pid));
       if (cycle) throw new CircularBomError([productId, detail.componentId]);
     }
-    if (!boms[productId]) boms[productId] = { version: 'v1.0', effectiveDate: '2000-01-01', batchYieldQty: 1, batchYieldUnit: 'ชิ้น', lossPct: 0, yieldPct: 100, details: [] };
+    if (!boms[productId]) boms[productId] = { version: 'v1.0', effectiveDate: '2000-01-01', batchYieldQty: 1, batchYieldUnit: 'ชิ้น', lossPct: 0, details: [] };
     const bomDetailId = 'd' + nextBomDetailId++;
     boms[productId].details.push({ bomDetailId, ...detail });
     return boms[productId];
@@ -1476,8 +1486,9 @@ function createStore() {
   function updateBomHeader(productId, patch) {
     if (!boms[productId]) throw new HttpError(404, 'ยังไม่มี BOM ของ ' + productId + ' กรุณาเพิ่ม Component อย่างน้อย 1 รายการก่อน');
     if (patch.batchYieldQty !== undefined && Number(patch.batchYieldQty) <= 0) throw new HttpError(400, 'จำนวนที่ผลิตได้/Batch ต้องมากกว่า 0');
-    if (patch.yieldPct !== undefined && Number(patch.yieldPct) <= 0) throw new HttpError(400, 'Yield % ต้องมากกว่า 0');
-    Object.assign(boms[productId], patch);
+    const { yieldPct: _ignoreYield, ...cleanPatch } = patch;
+    Object.assign(boms[productId], cleanPatch);
+    delete boms[productId].yieldPct;
     return boms[productId];
   }
 
@@ -3568,7 +3579,6 @@ function BomTab({ store, refresh }) {
           'ประเภทสินค้า': PRODUCT_TYPE_LABEL[p.type] || p.type,
           'Version': t.version || '',
           'Loss %': isFg ? '' : (t.lossPct ?? 0),
-          'Yield %': isFg ? '' : (t.yieldPct ?? 100),
           'ผลิตได้/Batch': t.batchYieldQty ?? 1,
           'หน่วย Batch': t.batchYieldUnit ?? 'ชิ้น',
           'ประเภท Component': TYPE_LABEL[c.componentType] || c.componentType,
@@ -3711,11 +3721,11 @@ function BomMaster({ productId, products, materials, store, refresh }) {
   const [editingId, setEditingId] = useState(null);
   const [editDraft, setEditDraft] = useState(null);
   const [editingHeader, setEditingHeader] = useState(false);
-  const [headerDraft, setHeaderDraft] = useState({ version: '', effectiveDate: TODAY, batchYieldQty: '1', batchYieldUnit: 'ชิ้น', lossPct: '0', yieldPct: '100' });
+  const [headerDraft, setHeaderDraft] = useState({ version: '', effectiveDate: TODAY, batchYieldQty: '1', batchYieldUnit: 'ชิ้น', lossPct: '0' });
   const [copyOpen, setCopyOpen] = useState(false);
   const [copySourceId, setCopySourceId] = useState('');
 
-  const tree = store.getBomTree(productId, TODAY) || { productId, productName: products[productId]?.name || productId, version: null, effectiveDate: null, batchYieldQty: 1, batchYieldUnit: 'ชิ้น', lossPct: 0, yieldPct: 100, components: [] };
+  const tree = store.getBomTree(productId, TODAY) || { productId, productName: products[productId]?.name || productId, version: null, effectiveDate: null, batchYieldQty: 1, batchYieldUnit: 'ชิ้น', lossPct: 0, components: [] };
 
   const totalsByUnit = useMemo(() => {
     const map = {};
@@ -3804,10 +3814,13 @@ function BomMaster({ productId, products, materials, store, refresh }) {
     } catch (e) { setSubmitError(e.message); }
   }
 
+  const headerAutoQty = !isFinished ? autoBatchQty({ details: tree.components.map((c) => ({ unit: c.unit, quantity: c.quantity })), batchYieldUnit: headerDraft.batchYieldUnit.trim() || 'ชิ้น', lossPct: headerDraft.lossPct }, products[productId]?.type) : null;
+  const headerDraftBatchQty = headerAutoQty != null ? headerAutoQty : headerDraft.batchYieldQty;
+
   function startEditHeader() {
     setHeaderDraft({
       version: tree.version || 'v1.0', effectiveDate: tree.effectiveDate || TODAY,
-      batchYieldQty: String(tree.batchYieldQty ?? 1), batchYieldUnit: tree.batchYieldUnit ?? 'ชิ้น', lossPct: String(tree.lossPct ?? 0), yieldPct: String(tree.yieldPct ?? 100),
+      batchYieldQty: String(tree.batchYieldQty ?? 1), batchYieldUnit: tree.batchYieldUnit ?? 'ชิ้น', lossPct: String(tree.lossPct ?? 0),
     });
     setSubmitError(null);
     setEditingHeader(true);
@@ -3820,7 +3833,6 @@ function BomMaster({ productId, products, materials, store, refresh }) {
                     batchYieldQty: 1,
           batchYieldUnit: headerDraft.batchYieldUnit.trim() || 'ชิ้น',
           lossPct: 0,
-          yieldPct: 100,
         });
         setEditingHeader(false);
         setSubmitError(null);
@@ -3829,12 +3841,12 @@ function BomMaster({ productId, products, materials, store, refresh }) {
       return;
     }
     if (!headerDraft.version.trim()) { setSubmitError('กรุณาระบุ Version'); return; }
-    if (!(Number(headerDraft.batchYieldQty) > 0)) { setSubmitError('จำนวนที่ผลิตได้/Batch ต้องมากกว่า 0'); return; }
-    if (!(Number(headerDraft.yieldPct) > 0)) { setSubmitError('Yield % ต้องมากกว่า 0'); return; }
+    if (!(Number(headerDraftBatchQty) > 0)) { setSubmitError('จำนวนที่ผลิตได้/Batch ต้องมากกว่า 0'); return; }
+    if (Number(headerDraft.lossPct) < 0 || Number(headerDraft.lossPct) >= 100) { setSubmitError('Loss % ต้องอยู่ระหว่าง 0 – 99.99'); return; }
     try {
       store.updateBomHeader(productId, {
         version: headerDraft.version.trim(),
-        batchYieldQty: Number(headerDraft.batchYieldQty), batchYieldUnit: headerDraft.batchYieldUnit.trim() || 'ชิ้น', lossPct: Number(headerDraft.lossPct), yieldPct: Number(headerDraft.yieldPct),
+        batchYieldQty: Number(headerDraftBatchQty), batchYieldUnit: headerDraft.batchYieldUnit.trim() || 'ชิ้น', lossPct: Number(headerDraft.lossPct),
       });
       setEditingHeader(false);
       setSubmitError(null);
@@ -3859,8 +3871,8 @@ function BomMaster({ productId, products, materials, store, refresh }) {
         store.addBomDetail(productId, { componentType: c.componentType, componentId: c.componentId, quantity: c.quantity, unit: c.unit }, TODAY);
       });
       store.updateBomHeader(productId, isFinished
-        ? { batchYieldQty: 1, batchYieldUnit: sourceTree.batchYieldUnit ?? 'ชิ้น', lossPct: 0, yieldPct: 100 }
-        : { batchYieldQty: sourceTree.batchYieldQty ?? 1, batchYieldUnit: sourceTree.batchYieldUnit ?? 'ชิ้น', lossPct: sourceTree.lossPct ?? 0, yieldPct: sourceTree.yieldPct ?? 100 });
+        ? { batchYieldQty: 1, batchYieldUnit: sourceTree.batchYieldUnit ?? 'ชิ้น', lossPct: 0 }
+        : { batchYieldQty: sourceTree.batchYieldQty ?? 1, batchYieldUnit: sourceTree.batchYieldUnit ?? 'ชิ้น', lossPct: sourceTree.lossPct ?? 0 });
       setCopyOpen(false);
       setCopySourceId('');
       setSubmitError(null);
@@ -3877,7 +3889,6 @@ function BomMaster({ productId, products, materials, store, refresh }) {
       'ประเภทสินค้า': PRODUCT_TYPE_LABEL[products[productId]?.type] || products[productId]?.type,
       'Version': tree.version || '',
       'Loss %': isFinished ? '' : (tree.lossPct ?? 0),
-      'Yield %': isFinished ? '' : (tree.yieldPct ?? 100),
       'ผลิตได้/Batch': tree.batchYieldQty ?? 1,
       'หน่วย Batch': tree.batchYieldUnit ?? 'ชิ้น',
       'ประเภท Component': TYPE_LABEL[c.componentType] || c.componentType,
@@ -3912,7 +3923,6 @@ function BomMaster({ productId, products, materials, store, refresh }) {
                 {tree.version && (
                   <span className="inline-flex items-center gap-2 rounded-full bg-slate-50 px-2.5 py-1 text-xs text-slate-500">
                     <span>Loss {fmt(tree.lossPct ?? 0)}%</span><span className="text-slate-300">·</span>
-                    <span>Yield {fmt(tree.yieldPct ?? 100)}%</span><span className="text-slate-300">·</span>
                     <span title="จำนวนที่ผลิตได้จาก Batch นี้">ผลิตได้/Batch {fmt(tree.batchYieldQty ?? 1)} {tree.batchYieldUnit ?? 'ชิ้น'}</span>
                   </span>
                 )}
@@ -3933,9 +3943,12 @@ function BomMaster({ productId, products, materials, store, refresh }) {
         ) : (
           <>
             <div><label className="text-xs text-slate-500">Version</label><input value={headerDraft.version} onChange={(e) => setHeaderDraft((h) => ({ ...h, version: e.target.value }))} className="mt-1 block w-28 rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
-            <div><label className="text-xs text-slate-500">Loss %</label><input type="number" value={headerDraft.lossPct} onChange={(e) => setHeaderDraft((h) => ({ ...h, lossPct: e.target.value }))} className="mt-1 block w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
-            <div><label className="text-xs text-slate-500">Yield %</label><input type="number" value={headerDraft.yieldPct} onChange={(e) => setHeaderDraft((h) => ({ ...h, yieldPct: e.target.value }))} className="mt-1 block w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
-            <div><label className="text-xs text-slate-500" title="จำนวนที่ผลิตได้จาก Batch นี้">ผลิตได้/Batch</label><input type="number" min="0" value={headerDraft.batchYieldQty} onChange={(e) => setHeaderDraft((h) => ({ ...h, batchYieldQty: e.target.value }))} className="mt-1 block w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+            <div><label className="text-xs text-slate-500">Loss %</label><input type="number" min="0" max="99.99" step="any" value={headerDraft.lossPct} onChange={(e) => setHeaderDraft((h) => ({ ...h, lossPct: e.target.value }))} className="mt-1 block w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+            <div><label className="text-xs text-slate-500" title={headerAutoQty != null ? 'คำนวณอัตโนมัติ = น้ำหนักรวม × (1 − Loss%)' : 'จำนวนที่ผลิตได้จาก Batch นี้'}>ผลิตได้/Batch{headerAutoQty != null && <span className="ml-1 text-[10px] text-amber-600">(อัตโนมัติ)</span>}</label>
+              {headerAutoQty != null
+                ? <input type="text" readOnly value={fmt(headerAutoQty)} className="mt-1 block w-28 cursor-not-allowed rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-sm tabular text-slate-700 outline-none" />
+                : <input type="number" min="0" value={headerDraft.batchYieldQty} onChange={(e) => setHeaderDraft((h) => ({ ...h, batchYieldQty: e.target.value }))} className="mt-1 block w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />}
+            </div>
             <div><label className="text-xs text-slate-500">หน่วย</label><input value={headerDraft.batchYieldUnit} onChange={(e) => setHeaderDraft((h) => ({ ...h, batchYieldUnit: e.target.value }))} placeholder="ชิ้น" className="mt-1 block w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
             <button onClick={() => setEditingHeader(false)} className="rounded-lg px-3 py-1.5 text-sm font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
             <button onClick={saveHeader} className="rounded-lg bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700">บันทึก</button>
@@ -4049,7 +4062,7 @@ function BomTreeNode({ node, depth = 0, hideBatchInfo = false, materials = {} })
         <span className="text-xs tabular text-slate-400">{node.productId}</span>
         <span className="text-sm font-medium text-slate-800">{node.productName}</span>
         {!hideBatchInfo && <span className="text-xs text-slate-400">{node.version}</span>}
-        {!hideBatchInfo && <span className="text-[11px] text-slate-400">Loss {fmt(node.lossPct ?? 0)}% · Yield {fmt(node.yieldPct ?? 100)}% · ผลิตได้/Batch {fmt(node.batchYieldQty ?? 1)} {node.batchYieldUnit ?? 'ชิ้น'}</span>}
+        {!hideBatchInfo && <span className="text-[11px] text-slate-400">Loss {fmt(node.lossPct ?? 0)}% · ผลิตได้/Batch {fmt(node.batchYieldQty ?? 1)} {node.batchYieldUnit ?? 'ชิ้น'}</span>}
         {hideBatchInfo && <span className="text-xs text-slate-400">หน่วย: {node.batchYieldUnit ?? 'ชิ้น'}</span>}
       </div>
       {node.components.map((c) => {
