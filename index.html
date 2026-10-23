@@ -100,6 +100,8 @@ function wouldCreateCycle(parentProductId, componentProductId, getSemiFinishedCh
   return dfs(componentProductId);
 }
 
+function isProducedComp(t) { return t === 'SEMI_FINISHED' || t === 'WIP' || t === 'FINISHED'; }
+
 function explodeBOM(productId, requiredQty, asOfDate, repo, visitedPath = []) {
   if (visitedPath.some((p) => String(p) === String(productId))) {
     throw new CircularBomError([...visitedPath, productId]);
@@ -118,7 +120,7 @@ function explodeBOM(productId, requiredQty, asOfDate, repo, visitedPath = []) {
       // ถ้าวัตถุดิบตัวนี้กำลังถูกสลับไปใช้ตัวทดแทนอยู่ ให้คำนวณ requirement/stock ไปที่ตัวทดแทนแทน
       const resolvedId = repo.resolveMaterial ? repo.resolveMaterial(detail.componentId) : detail.componentId;
       results.push({ type: detail.componentType, id: resolvedId, qty: neededQty, unit: detail.unit, source: { product: productId, bomDetailId: detail.bomDetailId, path: newPath } });
-    } else if (detail.componentType === 'SEMI_FINISHED' || detail.componentType === 'WIP') {
+    } else if (isProducedComp(detail.componentType)) {
       results.push({ type: detail.componentType, id: detail.componentId, qty: neededQty, unit: detail.unit, source: { product: productId, bomDetailId: detail.bomDetailId, path: newPath } });
       results.push(...explodeBOM(detail.componentId, neededQty, asOfDate, repo, newPath));
     } else {
@@ -180,9 +182,9 @@ function explodeAndAggregate(forecastLines, asOfDate, repo) {
           // ถ้าวัตถุดิบตัวนี้กำลังถูกสลับไปใช้ตัวทดแทนอยู่ ให้คำนวณ requirement/stock ไปที่ตัวทดแทนแทน
           const resolvedId = repo.resolveMaterial ? repo.resolveMaterial(detail.componentId) : detail.componentId;
           addReq(detail.componentType, resolvedId, neededQty, detail.unit, { product: node.productId, bomDetailId: detail.bomDetailId, path: newPath });
-        } else if (detail.componentType === 'SEMI_FINISHED' || detail.componentType === 'WIP') {
+        } else if (isProducedComp(detail.componentType)) {
           addReq(detail.componentType, detail.componentId, neededQty, detail.unit, { product: node.productId, bomDetailId: detail.bomDetailId, path: newPath });
-          if (!nextLevelDemand.has(detail.componentId)) nextLevelDemand.set(detail.componentId, { qty: 0, path: newPath });
+          if (!nextLevelDemand.has(detail.componentId)) nextLevelDemand.set(detail.componentId, { qty: 0, path: newPath, type: detail.componentType });
           nextLevelDemand.get(detail.componentId).qty += neededQty;
         } else {
           throw new Error('Unknown component_type: ' + detail.componentType);
@@ -200,7 +202,7 @@ function explodeAndAggregate(forecastLines, asOfDate, repo) {
         const cBom = repo.getActiveBom(componentId, asOfDate);
         const bq = cBom && Number(cBom.batchYieldQty) > 0 ? Number(cBom.batchYieldQty) : 0;
         let plannedQty = netQty, batches = null;
-        if (bq > 0) { batches = Math.ceil(round3(netQty / bq)); plannedQty = round3(batches * bq); }
+        if (bq > 0 && demand.type !== 'FINISHED') { batches = Math.ceil(round3(netQty / bq)); plannedQty = round3(batches * bq); }
         const prev = plannedProd.get(componentId) || { batches: 0, plannedQty: 0, batchSize: bq };
         prev.batches += (batches || 0); prev.plannedQty += plannedQty;
         plannedProd.set(componentId, prev);
@@ -211,7 +213,7 @@ function explodeAndAggregate(forecastLines, asOfDate, repo) {
   }
   for (const g of grossReq.values()) {
     const pp = plannedProd.get(g.id);
-    if (pp && (g.type === 'SEMI_FINISHED' || g.type === 'WIP')) { g.productionBatches = pp.batches; g.plannedProductionQty = round3(pp.plannedQty); g.batchSize = pp.batchSize; }
+    if (pp && isProducedComp(g.type)) { g.productionBatches = pp.batches; g.plannedProductionQty = round3(pp.plannedQty); g.batchSize = pp.batchSize; }
   }
   return Array.from(grossReq.values());
 }
@@ -225,7 +227,7 @@ function calculateBomCost(productId, asOfDate, repo) {
   let total = 0;
   for (const detail of bom.details) {
     const perUnitQty = detail.quantity / batchYieldQty;
-    const unitCost = (detail.componentType === 'SEMI_FINISHED' || detail.componentType === 'WIP')
+    const unitCost = isProducedComp(detail.componentType)
       ? calculateBomCost(detail.componentId, asOfDate, repo)
       : (repo.getMaterialPrice ? (repo.getMaterialPrice(detail.componentId) || 0) : 0);
     total += (unitCost * perUnitQty / yieldFactor) * lossFactor;
@@ -240,7 +242,7 @@ function calculateMRP(forecastLines, asOfDate, repo) {
     const stock = repo.getStock(item.type, item.id) || 0;
     const safetyStock = (repo.getSafetyStock && repo.getSafetyStock(item.id)) || 0;
     const scheduledReceipt = (repo.getScheduledReceipt && repo.getScheduledReceipt(item.id)) || 0;
-    const isProduced = item.type === 'SEMI_FINISHED' || item.type === 'WIP';
+    const isProduced = isProducedComp(item.type);
     const openQty = isProduced
       ? (repo.getOpenProductionQty && repo.getOpenProductionQty(item.id)) || 0
       : (repo.getOpenPoQty && repo.getOpenPoQty(item.id)) || 0;
@@ -1158,12 +1160,20 @@ function createStore() {
       getSemiFinishedChildren(productId) {
         const bom = boms[productId];
         if (!bom) return [];
-        return bom.details.filter((d) => d.componentType === 'SEMI_FINISHED' || d.componentType === 'WIP').map((d) => d.componentId);
+        return bom.details.filter((d) => isProducedComp(d.componentType)).map((d) => d.componentId);
       },
     };
   }
 
-  function createProduct({ productId, name, type }) {
+  function normSaleUnit(saleUnit, saleUnitRate) {
+    const u = (saleUnit == null ? '' : String(saleUnit)).trim();
+    if (!u) return { saleUnit: null, saleUnitRate: null };
+    const r = Number(saleUnitRate);
+    if (!(r > 0)) throw new HttpError(400, 'อัตราแปลงหน่วยขายต้องมากกว่า 0');
+    return { saleUnit: u, saleUnitRate: r };
+  }
+
+  function createProduct({ productId, name, type, saleUnit, saleUnitRate }) {
     if (!name) throw new HttpError(400, 'ขาดข้อมูลที่จำเป็น: name');
     if (type !== 'FINISHED' && type !== 'SEMI_FINISHED' && type !== 'WIP') throw new HttpError(400, 'type ต้องเป็น FINISHED, SEMI_FINISHED หรือ WIP');
     let id = productId;
@@ -1173,22 +1183,24 @@ function createStore() {
       id = 'P' + String(next).padStart(3, '0');
     }
     if (products[id]) throw new HttpError(400, 'มี Product รหัส ' + id + ' อยู่แล้ว');
-    products[id] = { name, type };
-    return { productId: id, name, type };
+    const su = normSaleUnit(saleUnit, saleUnitRate);
+    products[id] = { name, type, ...su };
+    return { productId: id, name, type, ...su };
   }
 
-  function updateProduct(productId, { name, type }) {
+  function updateProduct(productId, { name, type, saleUnit, saleUnitRate }) {
     const p = products[productId];
     if (!p) throw new HttpError(404, 'ไม่พบ Product: ' + productId);
     if (type !== undefined && type !== 'FINISHED' && type !== 'SEMI_FINISHED' && type !== 'WIP') throw new HttpError(400, 'type ต้องเป็น FINISHED, SEMI_FINISHED หรือ WIP');
     if (name !== undefined) { if (!name.trim()) throw new HttpError(400, 'ขาดข้อมูลที่จำเป็น: name'); p.name = name.trim(); }
     if (type !== undefined) p.type = type;
+    if (saleUnit !== undefined) Object.assign(p, normSaleUnit(saleUnit, saleUnitRate));
     return { productId, ...p };
   }
 
   function deleteProduct(productId) {
     if (!products[productId]) throw new HttpError(404, 'ไม่พบ Product: ' + productId);
-    const usedIn = [...whereUsed('SEMI_FINISHED', productId), ...whereUsed('WIP', productId)];
+    const usedIn = [...whereUsed('SEMI_FINISHED', productId), ...whereUsed('WIP', productId), ...whereUsed('FINISHED', productId)];
     if (usedIn.length > 0) {
       const names = usedIn.map((u) => u.productName).join(', ');
       throw new HttpError(400, 'ลบไม่ได้ เพราะสินค้านี้ถูกใช้เป็น Component อยู่ใน: ' + names + ' — กรุณาลบออกจาก BOM เหล่านั้นก่อน');
@@ -1433,9 +1445,9 @@ function createStore() {
       lossPct: bom.lossPct ?? 0,
       components: bom.details.map((d) => ({
         bomDetailId: d.bomDetailId, componentType: d.componentType, componentId: d.componentId,
-        name: (d.componentType === 'SEMI_FINISHED' || d.componentType === 'WIP') ? (products[d.componentId] || {}).name : (materials[d.componentId] || {}).name,
+        name: isProducedComp(d.componentType) ? (products[d.componentId] || {}).name : (materials[d.componentId] || {}).name,
         quantity: d.quantity, unit: d.unit,
-        children: (d.componentType === 'SEMI_FINISHED' || d.componentType === 'WIP') ? getBomTree(d.componentId, asOfDate) : null,
+        children: isProducedComp(d.componentType) ? getBomTree(d.componentId, asOfDate) : null,
       })),
     };
   }
@@ -1450,7 +1462,7 @@ function createStore() {
   }
 
   function addBomDetail(productId, detail, asOfDate) {
-    if (detail.componentType === 'SEMI_FINISHED' || detail.componentType === 'WIP') {
+    if (isProducedComp(detail.componentType)) {
       const repo = toEngineRepo(asOfDate);
       const cycle = wouldCreateCycle(productId, detail.componentId, (pid) => repo.getSemiFinishedChildren(pid));
       if (cycle) throw new CircularBomError([productId, detail.componentId]);
@@ -1474,7 +1486,7 @@ function createStore() {
     const detail = boms[productId].details.find((d) => d.bomDetailId === bomDetailId);
     if (!detail) throw new HttpError(404, 'ไม่พบ Component id=' + bomDetailId + ' ใน BOM ของ ' + productId);
     const merged = { ...detail, ...patch };
-    if ((merged.componentType === 'SEMI_FINISHED' || merged.componentType === 'WIP') && asOfDate) {
+    if (isProducedComp(merged.componentType) && asOfDate) {
       const repo = toEngineRepo(asOfDate);
       const cycle = wouldCreateCycle(productId, merged.componentId, (pid) => repo.getSemiFinishedChildren(pid));
       if (cycle) throw new CircularBomError([productId, merged.componentId]);
@@ -1672,7 +1684,7 @@ function createStore() {
     const allMrpItems = [...mrp.base, ...mrp.incremental];
     const usageByMaterial = allMrpItems.map((r) => ({
       id: r.id, type: r.type,
-      name: r.type === 'SEMI_FINISHED' ? ((products[r.id] || {}).name || r.id) : ((materials[r.id] || {}).name || r.id),
+      name: isProducedComp(r.type) ? ((products[r.id] || {}).name || r.id) : ((materials[r.id] || {}).name || r.id),
       qty: r.grossRequirement, unit: r.unit,
       value: round2(r.grossRequirement * materialUnitCost(r.id)),
     })).sort((a, b) => b.value - a.value);
@@ -1817,7 +1829,7 @@ function createStore() {
   function isValidStockTarget(id) {
     if (materials[id]) return true;
     const p = products[id];
-    return !!(p && (p.type === 'SEMI_FINISHED' || p.type === 'WIP'));
+    return !!(p && isProducedComp(p.type));
   }
 
   function importStock(rows) {
@@ -1840,7 +1852,7 @@ function createStore() {
   }
 
   function setStockQty(id, qty) {
-    if (!isValidStockTarget(id)) throw new HttpError(404, 'ไม่พบรหัสวัตถุดิบ/สินค้ากึ่งสำเร็จรูป: ' + id);
+    if (!isValidStockTarget(id)) throw new HttpError(404, 'ไม่พบรหัสวัตถุดิบ/สินค้า: ' + id);
     const q = Number(qty);
     if (Number.isNaN(q) || q < 0) throw new HttpError(400, 'จำนวนสต็อกต้องเป็นตัวเลขไม่ติดลบ');
     stock[id] = q;
@@ -1868,7 +1880,7 @@ function createStore() {
     const today = new Date().toISOString().slice(0, 10);
     if (asOfDate >= today) return { ...stock }; // ปัจจุบัน/อนาคต ให้ใช้สต็อกสดเสมอ
     const result = {};
-    const ids = [...Object.keys(materials), ...Object.entries(products).filter(([, p]) => p.type === 'SEMI_FINISHED' || p.type === 'WIP').map(([id]) => id)];
+    const ids = [...Object.keys(materials), ...Object.entries(products).filter(([, p]) => isProducedComp(p.type)).map(([id]) => id)];
     for (const id of ids) result[id] = getStockAsOf(id, asOfDate);
     return result;
   }
@@ -2099,9 +2111,9 @@ function StatusBadge({ status }) {
   );
 }
 
-const TYPE_LABEL = { SEMI_FINISHED: 'กึ่งสำเร็จรูป', WIP: 'WIP', RAW_MATERIAL: 'วัตถุดิบ', PACKAGING: 'บรรจุภัณฑ์' };
-const TYPE_COLOR = { SEMI_FINISHED: 'text-amber-700 bg-amber-50 ring-amber-600/20', WIP: 'text-violet-700 bg-violet-50 ring-violet-600/20', RAW_MATERIAL: 'text-slate-600 bg-slate-100 ring-slate-500/10', PACKAGING: 'text-sky-700 bg-sky-50 ring-sky-600/20' };
-const TYPE_ICON = { SEMI_FINISHED: 'layers', WIP: 'boxes', RAW_MATERIAL: 'wheat', PACKAGING: 'package' };
+const TYPE_LABEL = { FINISHED: 'FG (สินค้าสำเร็จรูป)', SEMI_FINISHED: 'กึ่งสำเร็จรูป', WIP: 'WIP', RAW_MATERIAL: 'วัตถุดิบ', PACKAGING: 'บรรจุภัณฑ์' };
+const TYPE_COLOR = { FINISHED: 'text-emerald-700 bg-emerald-50 ring-emerald-600/20', SEMI_FINISHED: 'text-amber-700 bg-amber-50 ring-amber-600/20', WIP: 'text-violet-700 bg-violet-50 ring-violet-600/20', RAW_MATERIAL: 'text-slate-600 bg-slate-100 ring-slate-500/10', PACKAGING: 'text-sky-700 bg-sky-50 ring-sky-600/20' };
+const TYPE_ICON = { FINISHED: 'package', SEMI_FINISHED: 'layers', WIP: 'boxes', RAW_MATERIAL: 'wheat', PACKAGING: 'package' };
 const PRODUCT_TYPE_LABEL = { FINISHED: 'Finished', SEMI_FINISHED: 'กึ่งสำเร็จรูป', WIP: 'WIP' };
 
 function TypeTag({ type }) {
@@ -2467,6 +2479,31 @@ function ModeSwitch({ mode, setMode }) {
   );
 }
 
+function saleInfoOf(store, productId) {
+  const p = store.products[productId];
+  return p && p.saleUnit && p.saleUnitRate > 0 ? { unit: p.saleUnit, rate: p.saleUnitRate } : null;
+}
+function toBaseQty(store, productId, value, useSale) {
+  const info = saleInfoOf(store, productId);
+  return useSale && info ? Math.round(Number(value) * info.rate * 1e6) / 1e6 : Number(value);
+}
+// ปุ่มสลับหน่วย (หน่วยฐาน <-> หน่วยขาย) + แสดงผลแปลงสด
+function QtyUnit({ store, productId, useSale, setUseSale, qty, light }) {
+  const base = (store.boms[productId] && store.boms[productId].batchYieldUnit) || '—';
+  const info = saleInfoOf(store, productId);
+  const cls = light ? 'bg-white ring-1 ring-inset ring-slate-200' : 'bg-slate-100';
+  if (!info) return <span className={`whitespace-nowrap rounded-lg ${cls} px-2.5 py-2 text-sm font-medium text-slate-500`}>{base}</span>;
+  return (
+    <span className="flex flex-col items-start gap-0.5">
+      <select value={useSale ? 'sale' : 'base'} onChange={(e) => setUseSale(e.target.value === 'sale')} className={`rounded-lg ${cls} px-2 py-2 text-sm font-medium text-slate-600 outline-none`}>
+        <option value="base">{base}</option>
+        <option value="sale">{info.unit} (×{info.rate})</option>
+      </select>
+      {useSale && Number(qty) > 0 && <span className="whitespace-nowrap text-[11px] text-amber-700">= {fmt(toBaseQty(store, productId, qty, true))} {base}</span>}
+    </span>
+  );
+}
+
 function NormalForecastPanel({ store, refresh }) {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
@@ -2475,9 +2512,11 @@ function NormalForecastPanel({ store, refresh }) {
   const [editingEntryId, setEditingEntryId] = useState(null);
   const [formProduct, setFormProduct] = useState('');
   const [formQty, setFormQty] = useState('');
+  const [useSale, setUseSale] = useState(false);
   const [formNote, setFormNote] = useState('');
   const [adjOpenFor, setAdjOpenFor] = useState(null);
   const [adjQty, setAdjQty] = useState('');
+  const [adjUseSale, setAdjUseSale] = useState(false);
   const [adjChannel, setAdjChannel] = useState('');
   const [rowError, setRowError] = useState(null);
   const [weeklyOpenFor, setWeeklyOpenFor] = useState(null);
@@ -2555,6 +2594,7 @@ function NormalForecastPanel({ store, refresh }) {
   function openAddForm() {
     setEditingEntryId(null);
     setFormQty('');
+    setUseSale(false);
     setFormNote('');
     if (finishedProducts.length) setFormProduct(finishedProducts[0][0]);
     setFormOpen((v) => !v);
@@ -2566,6 +2606,7 @@ function NormalForecastPanel({ store, refresh }) {
     setEditingEntryId(entry.productId);
     setFormProduct(entry.productId);
     setFormQty(String(cur.quantity));
+    setUseSale(false);
     setFormNote(cur.note || '');
     setFormOpen(true);
   }
@@ -2578,7 +2619,7 @@ function NormalForecastPanel({ store, refresh }) {
   }
 
   function submitForecast() {
-    const qty = Number(formQty);
+    const qty = toBaseQty(store, formProduct, formQty, useSale);
     if (!qty || qty <= 0) return;
     store.upsertForecast({ year, month, productId: formProduct, quantity: qty, note: formNote, enteredBy: 'purchasing' });
     doSaveNow();
@@ -2588,13 +2629,13 @@ function NormalForecastPanel({ store, refresh }) {
 
   function submitAdjustment(productId) {
     if (adjSavingRef.current) return; // กันกดซ้ำจนบันทึกซ้อนกัน (double-submit)
-    const qty = Number(adjQty);
+    const qty = toBaseQty(store, productId, adjQty, adjUseSale);
     if (!qty || qty <= 0) return;
     adjSavingRef.current = true;
     setAdjSaving(true);
     store.addForecastAdjustment({ year, month, productId, additionalQty: qty, customerChannel: adjChannel, enteredBy: 'purchasing' });
     doSaveNow();
-    setAdjQty(''); setAdjChannel('');
+    setAdjQty(''); setAdjChannel(''); setAdjUseSale(false);
     refresh();
     setTimeout(() => { adjSavingRef.current = false; setAdjSaving(false); }, 900);
   }
@@ -2656,7 +2697,7 @@ function NormalForecastPanel({ store, refresh }) {
             <div><label className="text-xs font-medium text-slate-500">Forecast Quantity</label>
               <div className="mt-1 flex items-center gap-2">
                 <input type="number" value={formQty} onChange={(e) => setFormQty(e.target.value)} placeholder="เช่น 10000" className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
-                <span className="whitespace-nowrap rounded-lg bg-slate-100 px-2.5 py-2 text-sm font-medium text-slate-500">{unitOf(editingEntryId || formProduct)}</span>
+                <QtyUnit store={store} productId={editingEntryId || formProduct} useSale={useSale && !editingEntryId} setUseSale={setUseSale} qty={formQty} />
               </div>
             </div>
             <div><label className="text-xs font-medium text-slate-500">หมายเหตุ</label>
@@ -2747,7 +2788,7 @@ function NormalForecastPanel({ store, refresh }) {
                         </div>
                       )}
                       <div className="flex flex-wrap items-end gap-3">
-                        <div><label className="text-xs font-medium text-slate-500">จำนวน Order เพิ่ม</label><input type="number" value={adjQty} onChange={(e) => setAdjQty(e.target.value)} className="mt-1 block w-32 rounded-lg border border-slate-200 px-3 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+                        <div><label className="text-xs font-medium text-slate-500">จำนวน Order เพิ่ม</label><div className="mt-1 flex items-start gap-2"><input type="number" value={adjQty} onChange={(e) => setAdjQty(e.target.value)} className="block w-32 rounded-lg border border-slate-200 px-3 py-1.5 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />{saleInfoOf(store, entry.productId) && <QtyUnit store={store} productId={entry.productId} useSale={adjUseSale} setUseSale={setAdjUseSale} qty={adjQty} />}</div></div>
                         <div><label className="text-xs font-medium text-slate-500">ลูกค้า / ช่องทาง</label><input value={adjChannel} onChange={(e) => setAdjChannel(e.target.value)} placeholder="เช่น Modern Trade" className="mt-1 block w-48 rounded-lg border border-slate-200 px-3 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
                         <button onClick={() => submitAdjustment(entry.productId)} disabled={adjSaving} className="rounded-lg bg-slate-900 px-3.5 py-1.5 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50">{adjSaving ? 'กำลังบันทึก...' : 'บันทึก'}</button>
                         <button onClick={() => setAdjOpenFor(null)} className="rounded-lg px-3.5 py-1.5 text-sm font-medium text-slate-500 hover:bg-slate-100">ปิด</button>
@@ -2776,6 +2817,7 @@ function SpecialForecastPanel({ store, refresh }) {
   const [formOpen, setFormOpen] = useState(false);
   const [formProduct, setFormProduct] = useState('');
   const [formQty, setFormQty] = useState('');
+  const [useSale, setUseSale] = useState(false);
   const [rowError, setRowError] = useState(null);
   const [deleteError, setDeleteError] = useState(null);
 
@@ -2815,12 +2857,12 @@ function SpecialForecastPanel({ store, refresh }) {
 
   function submitAdd() {
     setRowError(null);
-    const qty = Number(formQty);
+    const qty = toBaseQty(store, formProduct, formQty, useSale);
     if (!formProduct || !qty || qty <= 0) return;
     try {
       store.upsertSpecialForecast({ specialId, productId: formProduct, quantity: qty, enteredBy: 'purchasing' });
       doSaveNow();
-      setFormQty(''); setFormOpen(false);
+      setFormQty(''); setUseSale(false); setFormOpen(false);
       refresh();
     } catch (e) { setRowError(e.message); }
   }
@@ -2890,7 +2932,7 @@ function SpecialForecastPanel({ store, refresh }) {
                     <div><label className="text-xs font-medium text-slate-500">จำนวน</label>
                       <div className="mt-1 flex items-center gap-2">
                         <input type="number" value={formQty} onChange={(e) => setFormQty(e.target.value)} placeholder="เช่น 500" className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm tabular outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
-                        <span className="whitespace-nowrap rounded-lg bg-white px-2.5 py-2 text-sm font-medium text-slate-500 ring-1 ring-inset ring-slate-200">{unitOf(formProduct)}</span>
+                        <QtyUnit store={store} productId={formProduct} useSale={useSale} setUseSale={setUseSale} qty={formQty} light />
                       </div>
                     </div>
                   </div>
@@ -2955,7 +2997,7 @@ function NormalMrpPanel({ store, refresh }) {
   const products = store.products;
   const materials = store.materials;
 
-  function nameOf(type, id) { return type === 'SEMI_FINISHED' ? (products[id]?.name || id) : (materials[id]?.name || id); }
+  function nameOf(type, id) { return isProducedComp(type) ? (products[id]?.name || id) : (materials[id]?.name || id); }
 
   function saveActualOrder(rowKey, payload) {
     store.logActualOrder({ ...payload, month, year });
@@ -3131,7 +3173,7 @@ function SpecialMrpPanel({ store, refresh }) {
 
   useEffect(() => { if (!specialId && specialPeriods.length) setSpecialId(specialPeriods[0].id); }, [specialPeriods.length]);
 
-  function nameOf(type, id) { return type === 'SEMI_FINISHED' ? (products[id]?.name || id) : (materials[id]?.name || id); }
+  function nameOf(type, id) { return isProducedComp(type) ? (products[id]?.name || id) : (materials[id]?.name || id); }
 
   function saveActualOrder(rowKey, payload) {
     store.logActualOrder({ ...payload, specialId });
@@ -3514,14 +3556,16 @@ function BomTab({ store, refresh }) {
   const [newProductId, setNewProductId] = useState('');
   const [newProductName, setNewProductName] = useState('');
   const [newProductType, setNewProductType] = useState('FINISHED');
+  const [newSaleUnit, setNewSaleUnit] = useState('');
+  const [newSaleRate, setNewSaleRate] = useState('');
   const [productError, setProductError] = useState(null);
   const [deleteError, setDeleteError] = useState(null);
   const [editingProduct, setEditingProduct] = useState(false);
-  const [productDraft, setProductDraft] = useState({ name: '', type: 'FINISHED' });
+  const [productDraft, setProductDraft] = useState({ name: '', type: 'FINISHED', saleUnit: '', saleUnitRate: '' });
   const [productEditError, setProductEditError] = useState(null);
 
   function startEditProduct() {
-    setProductDraft({ name: products[selectedProduct].name, type: products[selectedProduct].type });
+    setProductDraft({ name: products[selectedProduct].name, type: products[selectedProduct].type, saleUnit: products[selectedProduct].saleUnit || '', saleUnitRate: products[selectedProduct].saleUnitRate || '' });
     setProductEditError(null);
     setEditingProduct(true);
   }
@@ -3532,7 +3576,7 @@ function BomTab({ store, refresh }) {
   function saveEditProduct() {
     if (!productDraft.name.trim()) { setProductEditError('กรุณาระบุชื่อสินค้า'); return; }
     try {
-      store.updateProduct(selectedProduct, { name: productDraft.name.trim(), type: productDraft.type });
+      store.updateProduct(selectedProduct, { name: productDraft.name.trim(), type: productDraft.type, saleUnit: productDraft.saleUnit, saleUnitRate: productDraft.saleUnitRate });
       setEditingProduct(false);
       setProductEditError(null);
       refresh();
@@ -3543,10 +3587,10 @@ function BomTab({ store, refresh }) {
     if (!newProductName.trim()) return;
     setProductError(null);
     try {
-      const created = store.createProduct({ productId: newProductId.trim() || undefined, name: newProductName.trim(), type: newProductType });
+      const created = store.createProduct({ productId: newProductId.trim() || undefined, name: newProductName.trim(), type: newProductType, saleUnit: newSaleUnit, saleUnitRate: newSaleRate });
       setSelectedProduct(created.productId);
       setTab('master');
-      setNewProductId(''); setNewProductName(''); setNewProductType('FINISHED'); setAddingProduct(false);
+      setNewProductId(''); setNewProductName(''); setNewProductType('FINISHED'); setNewSaleUnit(''); setNewSaleRate(''); setAddingProduct(false);
       refresh();
     } catch (e) { setProductError(e.message); }
   }
@@ -3622,9 +3666,16 @@ function BomTab({ store, refresh }) {
                 </select>
                 <input value={newProductId} onChange={(e) => setNewProductId(e.target.value)} placeholder="รหัสสินค้า (ไม่กรอก = สร้างอัตโนมัติ)" className="mt-2 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
                 <input value={newProductName} onChange={(e) => setNewProductName(e.target.value)} placeholder="ชื่อสินค้า" className="mt-2 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
+                <div className="mt-2 flex items-center gap-1.5 text-[11px] text-slate-500">
+                  <span className="shrink-0">1</span>
+                  <input value={newSaleUnit} onChange={(e) => setNewSaleUnit(e.target.value)} placeholder="หน่วยขาย เช่น ลัง" className="w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
+                  <span className="shrink-0">=</span>
+                  <input type="number" min="0" step="any" value={newSaleRate} onChange={(e) => setNewSaleRate(e.target.value)} placeholder="อัตรา" className="w-16 rounded-lg border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
+                  <span className="shrink-0">หน่วยฐาน</span>
+                </div>
                 {productError && <p className="mt-1.5 text-[11px] text-red-600">{productError}</p>}
                 <div className="mt-2 flex justify-end gap-1.5">
-                  <button onClick={() => { setAddingProduct(false); setProductError(null); setNewProductId(''); setNewProductName(''); }} className="rounded-lg px-2 py-1 text-[11px] font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
+                  <button onClick={() => { setAddingProduct(false); setProductError(null); setNewProductId(''); setNewProductName(''); setNewSaleUnit(''); setNewSaleRate(''); }} className="rounded-lg px-2 py-1 text-[11px] font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
                   <button onClick={submitNewProduct} className="rounded-lg bg-slate-900 px-2 py-1 text-[11px] font-medium text-white hover:bg-slate-700">สร้าง</button>
                 </div>
               </div>
@@ -3678,7 +3729,7 @@ function BomTab({ store, refresh }) {
                         <h2 className="font-display text-xl font-semibold text-slate-900">{products[selectedProduct].name}</h2>
                         <button onClick={startEditProduct} title="แก้ไขชื่อ/ประเภทสินค้า" className="text-slate-400 hover:text-slate-600"><Icon name="pencil" size={13} /></button>
                       </div>
-                      <p className="text-xs text-slate-400">{selectedProduct} · {PRODUCT_TYPE_LABEL[products[selectedProduct].type] || products[selectedProduct].type}</p>
+                      <p className="text-xs text-slate-400">{selectedProduct} · {PRODUCT_TYPE_LABEL[products[selectedProduct].type] || products[selectedProduct].type}{products[selectedProduct].saleUnit && products[selectedProduct].saleUnitRate ? ` · 1 ${products[selectedProduct].saleUnit} = ${products[selectedProduct].saleUnitRate} ${(store.boms[selectedProduct] && store.boms[selectedProduct].batchYieldUnit) || 'หน่วยฐาน'}` : ''}</p>
                     </div>
                     <button onClick={handleDeleteProduct} title="ลบสินค้านี้" className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-red-200 px-2.5 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50"><Icon name="trash" size={13} /> ลบสินค้า</button>
                   </>
@@ -3693,6 +3744,8 @@ function BomTab({ store, refresh }) {
                         <option value="WIP">WIP Product</option>
                       </select>
                     </div>
+                    <div><label className="text-xs text-slate-500">หน่วยขาย</label><input value={productDraft.saleUnit} onChange={(e) => setProductDraft((d) => ({ ...d, saleUnit: e.target.value }))} placeholder="เช่น ลัง" className="mt-1 block w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
+                    <div><label className="text-xs text-slate-500">อัตราแปลง (1 หน่วยขาย = ? หน่วยฐาน)</label><input type="number" min="0" step="any" value={productDraft.saleUnitRate} onChange={(e) => setProductDraft((d) => ({ ...d, saleUnitRate: e.target.value }))} placeholder="เช่น 12" className="mt-1 block w-28 rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" /></div>
                     {productEditError && <p className="text-xs text-red-600">{productEditError}</p>}
                     <button onClick={cancelEditProduct} className="rounded-lg px-3 py-1.5 text-sm font-medium text-slate-500 hover:bg-slate-100">ยกเลิก</button>
                     <button onClick={saveEditProduct} className="rounded-lg bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700">บันทึก</button>
@@ -3722,7 +3775,7 @@ function blankBomRow() {
   return { key: 'r' + Math.random().toString(36).slice(2, 9), type: 'RAW_MATERIAL', id: '', qty: '' };
 }
 
-function isProducedType(type) { return type === 'SEMI_FINISHED' || type === 'WIP'; }
+function isProducedType(type) { return isProducedComp(type); }
 
 function BomMaster({ productId, products, materials, store, refresh }) {
   const isFinished = products[productId]?.type === 'FINISHED';
@@ -3749,6 +3802,7 @@ function BomMaster({ productId, products, materials, store, refresh }) {
   function optionsFor(type) {
     if (type === 'SEMI_FINISHED') return Object.entries(products).filter(([id, p]) => p.type === 'SEMI_FINISHED' && id !== productId);
     if (type === 'WIP') return Object.entries(products).filter(([id, p]) => p.type === 'WIP' && id !== productId);
+    if (type === 'FINISHED') return Object.entries(products).filter(([id, p]) => p.type === 'FINISHED' && id !== productId);
     return Object.entries(materials).filter(([, m]) => m.type === type);
   }
 
@@ -3988,7 +4042,7 @@ function BomMaster({ productId, products, materials, store, refresh }) {
                   <td className="px-4 py-2">
                     <div className="flex items-center gap-2">
                       <select value={editDraft.type} onChange={(e) => setEditDraft((d) => ({ ...d, type: e.target.value, id: '' }))} className="rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
-                        <option value="RAW_MATERIAL">วัตถุดิบ</option><option value="PACKAGING">บรรจุภัณฑ์</option><option value="SEMI_FINISHED">กึ่งสำเร็จรูป</option><option value="WIP">WIP</option>
+                        <option value="RAW_MATERIAL">วัตถุดิบ</option><option value="PACKAGING">บรรจุภัณฑ์</option><option value="SEMI_FINISHED">กึ่งสำเร็จรูป</option><option value="WIP">WIP</option><option value="FINISHED">FG สำเร็จรูป</option>
                       </select>
                       <div className="w-56"><SearchableSelect options={optionsFor(editDraft.type).map(([id, o]) => [id, `${id} — ${o.name}`])} value={editDraft.id} onChange={(id) => setEditDraft((d) => ({ ...d, id }))} placeholder="พิมพ์ค้นหารหัส/ชื่อ..." /></div>
                     </div>
@@ -4032,7 +4086,7 @@ function BomMaster({ productId, products, materials, store, refresh }) {
               <div key={r.key} className="flex flex-wrap items-end gap-2 border-b border-slate-50 pb-3 last:border-0 last:pb-0">
                 <div><label className="text-xs text-slate-500">ประเภท</label>
                   <select value={r.type} onChange={(e) => updateRow(r.key, { type: e.target.value, id: '' })} className="mt-1 block w-32 rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
-                    <option value="RAW_MATERIAL">วัตถุดิบ</option><option value="PACKAGING">บรรจุภัณฑ์</option><option value="SEMI_FINISHED">กึ่งสำเร็จรูป</option><option value="WIP">WIP</option>
+                    <option value="RAW_MATERIAL">วัตถุดิบ</option><option value="PACKAGING">บรรจุภัณฑ์</option><option value="SEMI_FINISHED">กึ่งสำเร็จรูป</option><option value="WIP">WIP</option><option value="FINISHED">FG สำเร็จรูป</option>
                   </select>
                 </div>
                 <div className="w-72"><label className="text-xs text-slate-500">รายการ</label>
@@ -4104,9 +4158,7 @@ function BomTreeView({ productId, productType, store }) {
 }
 
 function WhereUsed({ productId, productType, products, store, jumpTo }) {
-  const usedIn = store.whereUsed(productType === 'FINISHED' ? 'SEMI_FINISHED' : productType, productId);
-  const asComponent = store.whereUsed('SEMI_FINISHED', productId);
-  const list = productType === 'SEMI_FINISHED' ? asComponent : usedIn;
+  const list = store.whereUsed(productType, productId);
   return (
     <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
       {list.length === 0 ? (
@@ -4563,7 +4615,7 @@ function SemiStockPanel({ store, refresh }) {
   function stockValueFor(id) { return stockMap ? stockMap[id] : (store.stock[id] || 0); }
 
   const semiProducts = Object.entries(products)
-    .filter(([, p]) => p.type === 'SEMI_FINISHED' || p.type === 'WIP')
+    .filter(([, p]) => isProducedComp(p.type))
     .sort(([idA], [idB]) => idA.localeCompare(idB, undefined, { numeric: true, sensitivity: 'base' }));
 
   function startEdit(id) { setEditingId(id); setEditQty(String(store.stock[id] || 0)); setRowError(null); }
@@ -4580,7 +4632,7 @@ function SemiStockPanel({ store, refresh }) {
   return (
     <div>
       <p className="font-display text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700">Bakery Purchasing · Master Data</p>
-      <h1 className="font-display mt-1 text-xl font-semibold text-slate-900 sm:text-2xl">สต็อกสินค้ากึ่งสำเร็จรูป (SEMI / WIP)</h1>
+      <h1 className="font-display mt-1 text-xl font-semibold text-slate-900 sm:text-2xl">สต็อกสินค้ากึ่งสำเร็จรูป / FG (SEMI / WIP / FG)</h1>
       <p className="mt-2 text-sm text-slate-500">สต็อกของสินค้ากึ่งสำเร็จรูป/WIP (เช่น ไส้ที่เตรียมไว้ล่วงหน้า, โดที่พักไว้) ระบบจะนำไปหักลบยอดที่ต้องผลิตใน MRP โดยอัตโนมัติ — แก้ไขจำนวนได้โดยตรงที่นี่ หรืออัพโหลดผ่านไฟล์สต็อกเดียวกับหน้าวัตถุดิบก็ได้ (ใส่รหัสสินค้ากึ่งสำเร็จรูปในคอลัมน์รหัสได้เลย)</p>
 
       <div className="mt-4 flex items-center gap-2">
@@ -4599,7 +4651,7 @@ function SemiStockPanel({ store, refresh }) {
         <table className="w-full text-sm">
           <thead><tr className="border-b border-slate-100 bg-slate-50/60 text-left text-xs font-medium uppercase tracking-wide text-slate-500"><th className="px-4 py-3">รหัส</th><th className="px-4 py-3">รายการ</th><th className="px-4 py-3">ประเภท</th><th className="px-4 py-3 text-right">สต็อกคงเหลือ{stockAsOfDate ? ` (ณ ${stockPeriodOptions.find((o) => o.value === stockPeriod)?.label})` : ''}</th><th className="px-4 py-3"></th></tr></thead>
           <tbody>
-            {semiProducts.length === 0 && <tr><td colSpan={5} className="px-4 py-8 text-center text-sm text-slate-400">ยังไม่มีสินค้ากึ่งสำเร็จรูป/WIP ในระบบ</td></tr>}
+            {semiProducts.length === 0 && <tr><td colSpan={5} className="px-4 py-8 text-center text-sm text-slate-400">ยังไม่มีสินค้ากึ่งสำเร็จรูป/WIP/FG ในระบบ</td></tr>}
             {semiProducts.map(([id, p]) => {
               const unit = boms[id]?.batchYieldUnit || 'ชิ้น';
               const isEditing = editingId === id;
